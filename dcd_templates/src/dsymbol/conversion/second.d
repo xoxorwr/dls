@@ -1067,6 +1067,17 @@ void resolveInheritance(DSymbol* symbol, ref TypeLookups typeLookups,
 					continue outer;
 				baseClass = symbols[0];
 			}
+
+			// `class Derived(T) : Base!T` -- the arguments written at the
+			// inheritance site, applied the same way a declared type applies
+			// its head instance.  Without them the child would import the
+			// generic `Base` and the base's members would keep the parameter.
+			if (part.identifierOrTemplateInstance !is null
+				&& part.identifierOrTemplateInstance.templateInstance !is null)
+				baseClass = instantiateFromNode(baseClass,
+					part.identifierOrTemplateInstance.templateInstance,
+					part.identifierOrTemplateInstance.tokens, symbol, moduleScope, cache,
+					mapping);
 		}
 		if (baseClass is null)
 			continue;
@@ -1155,6 +1166,12 @@ void resolveMixinTemplates(DSymbol* symbol,
 				}
 				currentSymbol = s[0];
 			}
+
+			// `mixin Extra!T;` -- the mixin template's own arguments, so the
+			// symbols it contributes follow this declaration's parameters.
+			if (currentSymbol !is null && ioti.templateInstance !is null)
+				currentSymbol = instantiateFromNode(currentSymbol, ioti.templateInstance,
+					ioti.tokens, symbol, moduleScope, cache, mapping);
 		}
 		if (currentSymbol !is null)
 		{
@@ -1365,6 +1382,7 @@ private DSymbol* instantiateFromNode(DSymbol* base, const(TemplateInstance) inst
 	{
 	case CompletionKind.structName:
 	case CompletionKind.className:
+	case CompletionKind.interfaceName:
 	case CompletionKind.templateName:
 	case CompletionKind.functionName:
 		break;
@@ -1514,6 +1532,22 @@ private DSymbol* instantiateSymbol(DSymbol* s, Scope* moduleScope, ref ModuleCac
 }
 
 /**
+ * Whether `symbol` declares template parameters of its own (`TD(T)`), in
+ * which case an instance built from it can have members still spelled with
+ * those parameters.
+ */
+private bool hasTemplateParameters(const DSymbol* symbol)
+{
+	if (symbol is null)
+		return false;
+	foreach (part; symbol.parts[])
+		if (part.ptr.kind == CompletionKind.typeTmpParam
+			|| part.ptr.kind == CompletionKind.variadicTmpParam)
+			return true;
+	return false;
+}
+
+/**
  * Whether `mapping` binds something an instance's recorded argument would be
  * substituted through -- the argument itself when it is a template parameter
  * (or an unresolved name), or one of its own arguments when it is a nested
@@ -1564,9 +1598,14 @@ private DSymbol* instantiateAggregate(DSymbol* s, DSymbol*[] args, istring[] arg
 	{
 		// Find all template parameters of s
 		DSymbol*[] params;
-		foreach (part; s.opSlice())
-			if (part.kind == CompletionKind.typeTmpParam || part.kind == CompletionKind.variadicTmpParam)
-				params ~= cast(DSymbol*)part;
+		// The symbol's own parameters only: 'opSlice' would also hand over the
+		// parameters of every template an import child reaches (a mixin
+		// template's `U` next to this symbol's `T`), and matching those
+		// against the arguments shifts every binding by one.
+		foreach (ownership; s.parts[])
+			if (ownership.ptr.kind == CompletionKind.typeTmpParam
+				|| ownership.ptr.kind == CompletionKind.variadicTmpParam)
+				params ~= ownership.ptr;
 
 		import std.algorithm.sorting : sort;
 		sort!((a, b) => a.location < b.location)(params);
@@ -1639,10 +1678,44 @@ private DSymbol* instantiateAggregate(DSymbol* s, DSymbol*[] args, istring[] arg
 			instantiated.name = buildInstanceName(source, args);
 	}
 
-	// Populate members, instantiating them if they use template parameters
-	foreach (part; s.opSlice())
+	// Populate members, instantiating them if they use template parameters.
+	// The symbol's own children are walked rather than 'opSlice', which
+	// flattens imports into the member list: an `import` child is what carries
+	// a base class, an `alias this` or a mixin template, and its *type* is
+	// what the mapping has to be applied to.  Copying the flattened members
+	// instead loses everything an import reaches through a template parameter
+	// (`alias value this;` in `Maybe(T)` has to follow `value` to the
+	// instantiated `User`).
+	foreach (ownership; s.parts[])
 	{
-		if (part.kind == CompletionKind.importSymbol) continue;
+		auto part = ownership.ptr;
+		if (part.kind == CompletionKind.importSymbol)
+		{
+			auto importType = instantiateSymbol(part.type, moduleScope, cache, nextMapping);
+			// The child can still point at a *generic* aggregate: a base class
+			// or mixin template written without arguments (`class D(T) :
+			// Base`) reaches the template itself, not an instance.  Its
+			// members have to follow this instance's mapping too, or its
+			// parameters leak into the member list (`T` offered as a member of
+			// `D!int`) and its members keep reporting `T`.
+			if (importType !is null && hasTemplateParameters(importType))
+				importType = instantiateAggregate(importType, null, null, moduleScope, cache,
+					nextMapping, istring.init, true);
+			if (importType is null)
+				continue;
+
+			auto newImport = GCAllocator.instance.make!DSymbol(part.name, part.kind, importType);
+			newImport.qualifier = part.qualifier;
+			newImport.protection = part.protection;
+			newImport.symbolFile = part.symbolFile;
+			newImport.location = part.location;
+			newImport.location_end = part.location_end;
+			newImport.flags = part.flags;
+			// The type is shared with the symbol this instance was built from.
+			newImport.ownType = false;
+			instantiated.addChild(newImport, true);
+			continue;
+		}
 		if (part.kind == CompletionKind.typeTmpParam || part.kind == CompletionKind.variadicTmpParam) continue;
 
 		// If type is null and it's a variable, it might have typeSymbolName that needs resolution

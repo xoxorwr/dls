@@ -50,6 +50,7 @@ far the most expensive part of a run.
 | `test_auto_declarations.py` | `auto` initializers and chained `auto` (the breadcrumb path) |
 | `test_template_instantiation.py` | members of an instantiated struct template show the argument's type |
 | `test_template_functions.py` | template functions: `T get(T)()` and return types built from parameters |
+| `test_import_symbols.py` | `alias this`, base classes and mixin templates (import children) inside templates |
 
 ## Writing a test
 
