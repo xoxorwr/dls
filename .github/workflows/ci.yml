@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same ref supersedes an in-flight run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LDC_VERSION: "1.42.0"
+
+jobs:
+  build-and-test:
+    name: build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install LDC
+        uses: dlang-community/setup-dlang@v2
+        with:
+          compiler: ldc-${{ env.LDC_VERSION }}
+
+      - name: Toolchain versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          ldmd2 --version | head -1
+          python3 --version
+
+      # Build everything: the DCD static library, then the dls server, with
+      # one compiler for both halves so they share a runtime.
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          make MODE=RELEASE
+
+      - name: Test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 run_tests.py

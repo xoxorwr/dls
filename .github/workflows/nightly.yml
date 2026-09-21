@@ -1,0 +1,215 @@
+name: nightly
+
+# Rolling binaries for the VS Code extension. Published as a prerelease
+# tagged `nightly` with stable asset names, so the client can always fetch:
+#   https://github.com/<owner>/<repo>/releases/download/nightly/<asset>
+# Assets:
+#   dls-linux-x64.tar.gz
+#   dls-darwin-arm64.tar.gz
+#   dls-darwin-x64.tar.gz
+#   dls-win-x64.zip
+#   dls.vsix
+#   SHA256SUMS
+#
+# Every archive holds the binary (`dls` / `dls.exe`, plus README.md) at its
+# root - that is where the extension's extractor looks (see
+# editors/vscode/src/server.ts).  The build is the same `make MODE=RELEASE`
+# CI runs, which leaves the binary at bin/dls (bin/dls.exe on Windows).
+# Manual only: run it from the Actions tab or `gh workflow run nightly.yml`.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+env:
+  LDC_VERSION: "1.42.0"
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS arm64 = macos-15; Intel x64 = macos-15-intel (macos-13 was
+        # retired, and macos-14 is deprecated).
+        include:
+          - os: ubuntu-latest
+            target: linux-x64
+            asset: dls-linux-x64.tar.gz
+            ldc: linux-x86_64
+          - os: macos-15
+            target: darwin-arm64
+            asset: dls-darwin-arm64.tar.gz
+            ldc: osx-universal
+          - os: macos-15-intel
+            target: darwin-x64
+            asset: dls-darwin-x64.tar.gz
+            ldc: osx-universal
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install LDC ${{ env.LDC_VERSION }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="https://github.com/ldc-developers/ldc/releases/download/v${LDC_VERSION}/ldc2-${LDC_VERSION}-${{ matrix.ldc }}.tar.xz"
+          curl -fsSL "$url" -o "$RUNNER_TEMP/ldc.tar.xz"
+          mkdir -p "$HOME/ldc"
+          tar -xf "$RUNNER_TEMP/ldc.tar.xz" -C "$HOME/ldc" --strip-components=1
+          echo "$HOME/ldc/bin" >> "$GITHUB_PATH"
+          "$HOME/ldc/bin/ldmd2" --version
+
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          make MODE=RELEASE
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x bin/dls
+          file bin/dls
+
+      # The extension untars straight into its storage dir, so the binary has
+      # to sit at the archive root as `dls`, not under bin/.
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp bin/dls dist/dls
+          cp README.md dist/README.md
+          tar -czf "${{ matrix.asset }}" -C dist dls README.md
+          tar -tzf "${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  build-windows:
+    name: build (win-x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dlang-community/setup-dlang@v2
+        with:
+          compiler: ldc-${{ env.LDC_VERSION }}
+
+      # The bundled cJSON.c goes through ImportC, which shells out to a C
+      # compiler: on Windows LDC looks for clang-cl.exe, then cl.exe, on PATH.
+      # The image ships LLVM; install it if it is missing and put its bin dir
+      # on PATH either way.
+      - name: Ensure clang-cl is on PATH
+        shell: pwsh
+        run: |
+          $cl = (Get-Command clang-cl.exe -ErrorAction SilentlyContinue).Source
+          if (-not $cl) {
+            $llvm = "C:\Program Files\LLVM\bin"
+            if (-not (Test-Path "$llvm\clang-cl.exe")) {
+              choco install llvm --no-progress -y
+            }
+            if (-not (Test-Path "$llvm\clang-cl.exe")) {
+              throw "clang-cl.exe not found in $llvm"
+            }
+            $llvm | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+            $cl = "$llvm\clang-cl.exe"
+          }
+          & $cl --version | Select-Object -First 1
+
+      # The build itself is the makefile; GNU make is not preinstalled.
+      - name: Install make
+        shell: pwsh
+        run: choco install make --no-progress -y
+
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          make MODE=RELEASE
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s bin/dls.exe
+          ls -l bin/dls.exe
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item bin\dls.exe dist\dls.exe
+          Copy-Item README.md dist\README.md
+          Compress-Archive -Path dist\dls.exe,dist\README.md -DestinationPath dls-win-x64.zip -Force
+          Get-Item dls-win-x64.zip
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: win-x64
+          path: dls-win-x64.zip
+          if-no-files-found: error
+
+  vsix:
+    name: build (vsix)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+
+      - name: Package extension
+        run: make build-vscode
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vsix
+          path: bin/dls.vsix
+          if-no-files-found: error
+
+  release:
+    name: publish nightly
+    needs: [build, build-windows, vsix]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: nightly
+          name: Nightly
+          prerelease: true
+          make_latest: "false"
+          overwrite_files: true
+          body: |
+            Rolling nightly build of `dls` (commit `${{ github.sha }}`),
+            compiled with LDC ${{ env.LDC_VERSION }} via `ldmd2`.
+
+            Assets: `dls-linux-x64.tar.gz`, `dls-darwin-arm64.tar.gz`,
+            `dls-darwin-x64.tar.gz`, `dls-win-x64.zip`, `dls.vsix`
+            (VS Code extension), plus `SHA256SUMS`.
+          files: dist/*

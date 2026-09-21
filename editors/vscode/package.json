@@ -1,0 +1,117 @@
+{
+  "name": "dls",
+  "displayName": "dls",
+  "description": "D language support: diagnostics, completion, signature help.",
+  "version": "0.0.0",
+  "publisher": "xoxorwr",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xoxorwr/dls.git"
+  },
+  "icon": "icon.png",
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onLanguage:d",
+    "onCommand:dls.createConfig"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "dls.createConfig",
+        "title": "dls: Create dls.json"
+      }
+    ],
+    "languages": [
+      {
+        "id": "d",
+        "aliases": [
+          "D"
+        ],
+        "extensions": [
+          ".d",
+          ".di"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "d",
+        "scopeName": "source.d",
+        "path": "./syntaxes/d.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "dls",
+      "properties": {
+        "dls.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the dls binary. Empty = download the nightly build for this platform into the extension's storage."
+        },
+        "dls.autoUpdate": {
+          "type": "boolean",
+          "default": true,
+          "description": "On activation, compare the nightly release's SHA256SUMS with the cached binary and re-download when it changed."
+        },
+        "dls.importPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Module import paths (-I). Per-editor defaults; prefer dls.json in the workspace for project truth."
+        },
+        "dls.stringImportPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "String import paths (-J) for import(\"...\") files."
+        },
+        "dls.flags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra dmd flags to mirror the project build, e.g. -preview=rvaluerefparam."
+        },
+        "dls.debounceMs": {
+          "type": "number",
+          "default": 500,
+          "description": "Diagnostics idle delay in milliseconds."
+        },
+        "dls.autoCloseBrackets": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically close brackets and quotes while typing."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p . --noEmit && node esbuild.js",
+    "package": "vsce package --pre-release --no-dependencies -o dls.vsix"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^10.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/vscode": "^1.91.0",
+    "@vscode/vsce": "^4.0.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.6.0"
+  }
+}

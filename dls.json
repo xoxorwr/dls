@@ -1,0 +1,6 @@
+{
+    "importPaths": [
+        "server/",
+        "dcd_templates/src"
+    ]
+}

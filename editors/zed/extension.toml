@@ -1,0 +1,15 @@
+id = "d"
+name = "D Language"
+description = "D language support"
+version = "0.0.1"
+schema_version = 1
+authors = ["xoxorwr <none>"]
+repository = "https://github.com/xoxorwr/dls"
+
+[language_servers.dls]
+name = "dls"
+language = "D"
+
+[grammars.d]
+repository = "https://github.com/gdamore/tree-sitter-d"
+commit = "750dde90ed9cdbd82493bc28478d8ab1976b0e9f"
