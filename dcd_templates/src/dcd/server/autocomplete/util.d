@@ -124,8 +124,11 @@ istring stringToken()(auto ref const Token a)
 auto getTokensBeforeCursor(const(ubyte[]) sourceCode, size_t cursorPosition,
 	ref StringCache cache, out const(Token)[] tokenArray)
 {
-    // HACK: struct TTT{  Typ| } <- no completion unless there is a ';'
-    auto modify = cast(ubyte[]) sourceCode;
+    // HACK: struct TTT{  Typ| } <- no completion unless there is a ';'.
+    // The replacement goes into a private copy: the caller's buffer is an open
+    // document (served under a `const` slice), and a completion must not leave
+    // a stray ';' in it for every later request to parse.
+    ubyte[] modified;
     if (cursorPosition < sourceCode.length
         && (
             sourceCode[cursorPosition] == '\n'
@@ -135,8 +138,10 @@ auto getTokensBeforeCursor(const(ubyte[]) sourceCode, size_t cursorPosition,
         )
     )
     {
-        modify[cursorPosition] = cast(ubyte)';';
+        modified = sourceCode.dup;
+        modified[cursorPosition] = cast(ubyte) ';';
     }
+    auto source = modified.length ? modified : cast(ubyte[]) sourceCode;
 
     //size_t a = cursorPosition;
     //while(a > 0)
@@ -149,7 +154,7 @@ auto getTokensBeforeCursor(const(ubyte[]) sourceCode, size_t cursorPosition,
 
 	LexerConfig config;
 	config.fileName = "";
-	tokenArray = getTokensForParser(cast(ubyte[]) sourceCode, config, &cache);
+	tokenArray = getTokensForParser(source, config, &cache);
 	auto sortedTokens = assumeSorted(tokenArray);
 	return sortedTokens.lowerBound(cast(size_t) cursorPosition);
 }

@@ -71,16 +71,17 @@ ConstantCompletion[] parsePragmas(string ddoc)
 			foundTerminator = true;
 			break;
 		}
-		else if (strippedLine.startsWith("$(DT $(LNAME2 "))
+		else if (line.canFind("$(D pragma "))
 		{
 			addCurrent();
-			seekingToFirst = false;
-			indent = line[0 .. $ - strippedLine.length];
-			string identifierLine = strippedLine.stripRight; // fully stripped
-			auto closing = identifierLine.indexOfAny("),");
+			// `$(H3 $(LNAME2 anchor, $(D pragma name)))`: the identifier to
+			// complete is the pragma's own name, not the section anchor.
+			auto i = line.indexOf("$(D pragma ");
+			auto closing = line.indexOfAny("),", i);
 			if (closing == -1)
-				closing = identifierLine.length;
-			current.identifiers = [identifierLine["$(DT $(LNAME2".length .. closing].strip];
+				closing = line.length;
+			current.identifiers = [line[i + "$(D pragma ".length .. closing].strip];
+			seekingToFirst = false;
 		}
 		else if (!seekingToFirst)
 		{
@@ -211,7 +212,10 @@ immutable ConstantCompletion[] traits = [
 
 	string part3 = "];";
 
-	auto file = File("../common/src/dcd/common/constants2.d", "w");
+	if (pragmas.length == 0 || traits.length == 0)
+		throw new Exception("Generated an empty list: the spec markup changed, check parsePragmas/parseTraits.");
+
+	auto file = File("../src/dcd/common/constants2.d", "w");
 	file.writeln(part1);
 	foreach (pragma_; pragmas.sorted)
 		file.writeln('\t', pragma_, ",");

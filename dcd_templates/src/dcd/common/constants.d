@@ -54,6 +54,18 @@ immutable ConstantCompletion[] scopes = [
 ];
 
 /**
+ * Keywords whose argument list DCD completes (`calltipCompletion`): typing
+ * the prefix offers the keyword, and the list follows the `(`.
+ */
+immutable ConstantCompletion[] completingKeywords = [
+	ConstantCompletion("__traits", "Compile-time reflection: `__traits(Trait, arguments...)`."),
+	ConstantCompletion("extern", "Linkage attribute: `extern(Linkage)`."),
+	ConstantCompletion("pragma", "Implementation-defined pragma: `pragma(name, arguments...)`."),
+	ConstantCompletion("scope", "Scope guard: `scope(exit | success | failure)`."),
+	ConstantCompletion("version", "Conditional compilation: `version(Identifier)`."),
+];
+
+/**
  * Compiler-defined values for version() conditions.
  */
 immutable ConstantCompletion[] predefinedVersions = [

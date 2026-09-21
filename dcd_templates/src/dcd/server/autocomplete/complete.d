@@ -319,6 +319,31 @@ AutocompleteResponse dotCompletion(T)(T beforeTokens, const(Token)[] tokenArray,
 		else
 			return response;
 	}
+
+	// Keyword completion, in both positions: the bare prefix (`__tra` ->
+	// `__traits`) and the name being typed inside the parens (`__traits(g` ->
+	// `getMember`, ...).  Never after a dot - `x.__traits` is not a call.
+	if (partial.length && !(beforeTokens.length >= 1 && beforeTokens[$ - 1] == tok!"."))
+	{
+		immutable(ConstantCompletion)[] keywordItems = completingKeywords;
+		bool insideArguments = false;
+		if (beforeTokens.length >= 2 && beforeTokens[$ - 1] == tok!"(")
+		{
+			keywordItems = keywordCompletions(beforeTokens[$ - 2].type);
+			insideArguments = keywordItems !is null;
+		}
+		foreach (completion; keywordItems)
+			if (completion.identifier.length >= partial.length
+				&& completion.identifier[0 .. partial.length] == partial)
+				response.completions ~= AutocompleteResponse.Completion(
+					completion.identifier, CompletionKind.keyword, null, null, 0,
+					completion.ddoc);
+		if (insideArguments)
+			// The name in there is a keyword, not an expression: the scope's
+			// symbols would only be noise (`pragma(i` -> `int`, `imported`).
+			return response;
+	}
+
 	switch (significantTokenType)
 	{
 	mixin(STRING_LITERAL_CASES);
@@ -775,25 +800,15 @@ AutocompleteResponse calltipCompletion(T)(T beforeTokens,
 	CalltipHint calltipHint = CalltipHint.none)
 {
 	AutocompleteResponse response;
-	immutable(ConstantCompletion)[] completions;
 	auto significantTokenId = getSignificantTokenId(beforeTokens);
 	switch (significantTokenId)
 	{
 	case tok!"__traits":
-		completions = traits;
-		goto fillResponse;
 	case tok!"scope":
-		completions = scopes;
-		goto fillResponse;
 	case tok!"version":
-		completions = predefinedVersions;
-		goto fillResponse;
 	case tok!"extern":
-		completions = linkages;
-		goto fillResponse;
 	case tok!"pragma":
-		completions = pragmas;
-	fillResponse:
+		auto completions = keywordCompletions(significantTokenId);
 		response.completionType = CompletionType.identifiers;
 		foreach (completion; completions)
 		{
@@ -861,6 +876,27 @@ AutocompleteResponse calltipCompletion(T)(T beforeTokens,
 		break;
 	}
 	return response;
+}
+
+/// The argument-name list of a keyword DCD completes, or null when `token` is
+/// not one of them (`__traits(` -> the traits, `pragma(` -> the pragmas, ...).
+immutable(ConstantCompletion)[] keywordCompletions(IdType token)
+{
+	switch (token)
+	{
+	case tok!"__traits":
+		return traits;
+	case tok!"pragma":
+		return pragmas;
+	case tok!"extern":
+		return linkages;
+	case tok!"scope":
+		return scopes;
+	case tok!"version":
+		return predefinedVersions;
+	default:
+		return null;
+	}
 }
 
 IdType getSignificantTokenId(T)(T beforeTokens)
