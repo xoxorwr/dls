@@ -98,7 +98,9 @@ bool shouldSwapWithType(CompletionType completionType, CompletionKind kind,
 		|| kind == CompletionKind.functionName;
 	return isInteresting && (completionType == CompletionType.identifiers
 		|| completionType == CompletionType.structMembers
-		|| (completionType == completionType.calltips && kind == CompletionKind.variableName)) ;
+		|| (completionType == completionType.calltips
+			&& (kind == CompletionKind.variableName
+				|| kind == CompletionKind.memberVariableName))) ;
 }
 
 istring stringToken()(auto ref const Token a)

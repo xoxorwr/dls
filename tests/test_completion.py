@@ -1,6 +1,6 @@
 """Completion behaviour and response shape."""
 
-from harness import KIND_FIELD, DlsTestCase, find_item, labels
+from harness import KIND_FIELD, KIND_VARIABLE, DlsTestCase, find_item, labels
 
 
 MEMBERS = """module app;
@@ -45,6 +45,26 @@ int compute(int x) { return x; }
 void main()
 {
     comp
+}
+"""
+
+
+FUNCTION_POINTERS = """module app;
+
+struct State {}
+
+void function(State*) free_fp;
+
+struct Box
+{
+    void function(State*) fp;
+}
+
+void main()
+{
+    Box b;
+    free_fp;
+    b.fp;
 }
 """
 
@@ -104,3 +124,28 @@ class CompletionTests(DlsTestCase):
         found = labels(items)
         self.assertIn("aaa", found)
         self.assertNotIn("bbb", found)
+
+
+class FunctionPointerCompletionTests(DlsTestCase):
+    """A function pointer keeps its own kind but shows the type it points at.
+
+    ``void function(State*) fn;`` declares a variable, so the label says
+    variable (or field for a member) - and the type it is shown with is the
+    whole function type, not the bare word "function".
+    """
+
+    PROJECT = {"app.d": FUNCTION_POINTERS}
+
+    def test_a_variable_is_a_variable_typed_void_function(self):
+        doc = self.open_doc("app.d")
+        # The second occurrence: the first is the declaration itself.
+        items = doc.completion("free_fp", occurrence=1)["items"]
+        item = find_item(items, "free_fp")
+        self.assertEqual(item["kind"], KIND_VARIABLE)
+        self.assertEqual(item["labelDetails"]["description"], "void function(State*)")
+
+    def test_a_member_is_a_field_typed_void_function(self):
+        doc = self.open_doc("app.d")
+        item = find_item(doc.completion("b.fp")["items"], "fp")
+        self.assertEqual(item["kind"], KIND_FIELD)
+        self.assertEqual(item["labelDetails"]["description"], "void function(State*)")

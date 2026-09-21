@@ -50,3 +50,51 @@ class SignatureHelpTests(DlsTestCase):
     def test_no_signature_outside_a_call(self):
         result = self.doc.signature_help("void main()", offset=0)
         self.assertEqual(result["signatures"], [])
+
+
+FUNCTION_POINTERS = """module app;
+
+struct State {}
+
+void function(State*) free_fp;
+
+struct Box
+{
+    void function(State*) fp;
+}
+
+void main()
+{
+    void function(State*) local_fp;
+    Box b;
+    free_fp();
+    local_fp();
+    b.fp();
+}
+"""
+
+
+class FunctionPointerSignatureTests(DlsTestCase):
+    """A call through a function pointer is still a call.
+
+    The call tip lives on the variable's *type*, not on the variable, so the
+    resolver has to follow it - including through a member access.
+    """
+
+    PROJECT = {"app.d": FUNCTION_POINTERS}
+
+    def setUp(self):
+        self.doc = self.open_doc("app.d")
+
+    def labels_at(self, needle):
+        result = self.doc.signature_help(needle)
+        return [signature["label"] for signature in result["signatures"]]
+
+    def test_a_module_level_function_pointer(self):
+        self.assertEqual(self.labels_at("free_fp("), ["void function(State*)"])
+
+    def test_a_local_function_pointer(self):
+        self.assertEqual(self.labels_at("local_fp("), ["void function(State*)"])
+
+    def test_a_function_pointer_field(self):
+        self.assertEqual(self.labels_at("b.fp("), ["void function(State*)"])

@@ -562,6 +562,14 @@ struct DSymbol
 			else
 				return type.formatType("[" ~ key ~ "]" ~ suffix);
 		}
+		else if (qualifier == SymbolQualifier.func && callTip.length)
+		{
+			// A `T function(Args)` / `T delegate(Args)` type -- not a function
+			// declaration, which the branch above formats through its return
+			// type. The suffix builder spelled the whole type into the call
+			// tip, return type included.
+			return callTip ~ suffix;
+		}
 		else
 		{
 			// TODO: include template parameters
