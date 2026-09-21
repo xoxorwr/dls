@@ -16,6 +16,8 @@ editors/vscode/*.vsix
 # --- Zed extension ---------------------------------------------------------
 editors/zed/target/
 editors/zed/extension.wasm
+# Zed clones the grammar pinned in extension.toml here and builds its .wasm.
+editors/zed/grammars/
 
 # --- Editor / tool scratch -------------------------------------------------
 .st/
