@@ -1,4 +1,4 @@
-module rt.crash_handler.posix;
+module rt.crash_handler.linux;
 
 import core.stdc.stdlib;
 import core.stdc.string;

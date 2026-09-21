@@ -26,11 +26,7 @@ __gshared:
 
 mem.ArenaAllocator arena;
 
-/**
- * The JSON reader and builder every request goes through.  Nodes are
- * allocated from 'arena', so the 'dispose' at the end of a request reclaims
- * the request, the response and everything in between in one go.
- */
+/// Nodes come from 'arena', so one 'dispose' per request reclaims them.
 Json json;
 
 /**
@@ -91,8 +87,7 @@ extern(C) void main(int argc, char** argv) {
     rt_register_crash_handler();
 
     arena = mem.ArenaAllocator.create(heap_allocator);
-    // 'arena.allocator()' wraps the arena itself, so this stays valid across
-    // the 'dispose' that ends every request.
+    // Wraps the arena itself, so this survives each request's 'dispose'.
     json = Json.create(arena.allocator());
     // TODO: remove this
     //  - auto detect dmd/ldc
@@ -168,8 +163,7 @@ size_t parse_header() {
 JsonNode* parse_content(mem.Allocator alloc, size_t len) {
     if (len == 0) return null;
 
-    // Allocate len + 1 so the bytes can be NUL-terminated; the parser takes
-    // the length, but C strings are what the rest of the server passes around.
+    // Allocate len + 1 for the NUL the handlers expect.
     char[] buffer = alloc.alloc!(char)(len + 1);
     if (buffer.ptr == null) exit(1);
 
@@ -1343,7 +1337,6 @@ void lsp_send_request(int id, const(char)* method, JsonNode* params) {
 
 /// Frames 'message' and writes it to stdout.
 void send_message(JsonNode* message) {
-    // The printer already emits the compact form, so nothing is minified here.
     auto output = printJsonStr(message);
     char[64] header;
     auto headerLen = snprintf(header.ptr, header.length, "Content-Length: %u\r\n\r\n",
@@ -1519,28 +1512,20 @@ void lsp_send_notification(const(char)* method, JsonNode* params)
 
 // HELPERS
 
-/**
- * A client is free to leave a field out - or to send the wrong type for one -
- * and a handler has to read that as 'false' (or as a null string) instead of
- * dying on it.  rt.json's own predicates and accessors assert that the node
- * is there, so they are only ever reached through these.
- */
+/// rt.json's predicates assert the node is there; a request may omit anything.
 bool json_is_string(JsonNode* node) { return node !is null && json.is_string(node); }
 bool json_is_number(JsonNode* node) { return node !is null && json.is_number(node); }
 bool json_is_array(JsonNode* node) { return node !is null && json.is_array(node); }
 bool json_is_true(JsonNode* node) { return node !is null && json.is_true(node); }
 
-/// The text of a string node, or null when there is no node or it isn't one.
 char* json_string(JsonNode* node) {
     return json_is_string(node) ? json.get_string(node) : null;
 }
 
-/// The number of an integer node, or 'fallback' when there is none.
 int json_int(JsonNode* node, int fallback) {
     return json_is_number(node) ? json.get_integer(node) : fallback;
 }
 
-/// 'object.name' as a C string, or null when the name isn't there.
 char* json_string_item(JsonNode* object, const(char)* name) {
     return json_string(json.get_object_item(object, name));
 }

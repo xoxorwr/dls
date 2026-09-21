@@ -27,15 +27,23 @@ else version (Posix)
     import core.stdc.string;
     import core.stdc.stdio;
 
+    // Darwin names the calling thread and takes no handle.
+    version (OSX)
+        extern(C) int pthread_setname_np(const(char)* name);
+    else
+        extern(C) int pthread_setname_np(pthread_t thread, const(char)* name);
+
     extern (C) void* ThreadProc(void* pParam)
     {
         Thread* p = cast(Thread*) pParam;
+        version (OSX)
+        {
+            if (p.name !is null)
+                pthread_setname_np(p.name);
+        }
         p.run();
         return null;
     }
-
-
-    extern(C) int pthread_setname_np(pthread_t thread, const (char) *name);
 }
 
 struct Thread
@@ -69,12 +77,27 @@ struct Thread
         }
         else version (Posix)
         {
-            size_t ptid = 0;
+            // Darwin's pthread_t is an opaque pointer.
+            version (OSX)
+                pthread_t ptid;
+            else
+                size_t ptid;
+
             int ret = pthread_create(&ptid, null, &ThreadProc, cast(void*)&this);
             if (ret != 0)
                 return false;
-            pthread_setname_np(ptid, name);
-            thread_id = ptid;
+
+            version (OSX)
+            {
+                // 'ThreadProc' names the new thread: from here it would name
+                // this one.
+            }
+            else
+            {
+                pthread_setname_np(ptid, name);
+            }
+
+            thread_id = cast(ulong) ptid;
         }
         return true;
     }

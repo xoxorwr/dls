@@ -30,7 +30,16 @@ int cas (uint* val, uint expected, uint desired)
         }
     }
     else
-        static assert("No compare and swap for this platform");
+    {
+        import core.atomic : atomicLoad, cas;
+
+        // druntime's CAS only reports whether the store happened.
+        auto target = cast(shared(uint)*) val;
+        uint current = atomicLoad(*target);
+        while (current == expected && !cas(target, expected, desired))
+            current = atomicLoad(*target);
+        return cast(int) current;
+    }
 }
 
 int cas (int* val, int expected, int desired)
@@ -76,7 +85,15 @@ int cas (int* val, int expected, int desired)
         }
     }
     else
-        static assert("No compare and swap for this platform");
+    {
+        import core.atomic : atomicLoad, cas;
+
+        auto target = cast(shared(int)*) val;
+        int current = atomicLoad(*target);
+        while (current == expected && !cas(target, expected, desired))
+            current = atomicLoad(*target);
+        return current;
+    }
 }
 
 void increment(ulong* reference)
@@ -91,6 +108,8 @@ void increment(ulong* reference)
             ret;
         }
     }
+    else
+        atomicAdd(reference, 1);
 }
 
 void increment(uint* reference)
@@ -105,6 +124,8 @@ void increment(uint* reference)
             ret;
         }
     }
+    else
+        atomicAdd(reference, 1);
 }
 void increment(int* reference)
 {
@@ -118,6 +139,8 @@ void increment(int* reference)
             ret;
         }
     }
+    else
+        atomicAdd(reference, 1);
 }
 
 void decrement(ulong* reference)
@@ -132,6 +155,8 @@ void decrement(ulong* reference)
             ret;
         }
     }
+    else
+        atomicSub(reference, 1);
 }
 
 void decrement(uint* reference)
@@ -146,6 +171,8 @@ void decrement(uint* reference)
             ret;
         }
     }
+    else
+        atomicSub(reference, 1);
 }
 void decrement(int* reference)
 {
@@ -159,6 +186,8 @@ void decrement(int* reference)
             ret;
         }
     }
+    else
+        atomicSub(reference, 1);
 }
 
 void add(ulong* reference, ulong value)
@@ -173,6 +202,8 @@ void add(ulong* reference, ulong value)
             ret;
         }
     }
+    else
+        atomicAdd(reference, value);
 }
 
 void add(uint* reference, uint value)
@@ -187,6 +218,20 @@ void add(uint* reference, uint value)
             ret;
         }
     }
+    else
+        atomicAdd(reference, value);
+}
+
+private void atomicAdd(T)(T* reference, size_t value)
+{
+    import core.atomic : atomicFetchAdd;
+    atomicFetchAdd(*reference, value);
+}
+
+private void atomicSub(T)(T* reference, size_t value)
+{
+    import core.atomic : atomicFetchSub;
+    atomicFetchSub(*reference, value);
 }
 
 /*

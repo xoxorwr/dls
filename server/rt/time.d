@@ -7,6 +7,19 @@ version (WebAssembly)
     import rt.wasm;
 }
 
+version (OSX)
+{
+    // Darwin's POSIX header has neither clock_gettime nor CLOCK_MONOTONIC.
+    private struct mach_timebase_info_data_t
+    {
+        uint numer;
+        uint denom;
+    }
+
+    private extern(C) int mach_timebase_info(mach_timebase_info_data_t* info);
+    private extern(C) ulong mach_absolute_time();
+}
+
 long get_unix_time()
 {
     version (WebAssembly)
@@ -37,6 +50,10 @@ ulong ticks()
         LARGE_INTEGER counter;
         QueryPerformanceCounter(&counter);
         return counter.QuadPart;
+    }
+    else version (OSX)
+    {
+        return mach_absolute_time();
     }
     else version (Posix)
     {
@@ -70,6 +87,13 @@ ulong frequency()
         LARGE_INTEGER frequency;
         QueryPerformanceFrequency(&frequency);
         return frequency.QuadPart;
+    }
+    else version (OSX)
+    {
+        mach_timebase_info_data_t info;
+        if (mach_timebase_info(&info) != 0 || info.numer == 0 || info.denom == 0)
+            return 1_000_000_000;
+        return 1_000_000_000 * cast(ulong) info.denom / info.numer;
     }
     else version (Posix)
     {
