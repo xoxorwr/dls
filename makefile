@@ -13,7 +13,11 @@
 # defaults to ldmd2, LDC's dmd-compatible driver, which is what the dmd-style
 # flags below (`-P=`, compiling the bundled C file) need.
 
+ifeq ($(origin DC),environment)
+DC := ldmd2
+else
 DC ?= ldmd2
+endif
 MODE ?= DEBUG
 PREVIEWS := -preview=rvaluerefparam -preview=bitfields
 # cJSON is C: the D compiler preprocesses it in place, which wants the GNU

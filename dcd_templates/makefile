@@ -13,7 +13,11 @@
 # Use the same compiler as the server (see the top-level makefile): the two
 # must share one D runtime to link together.
 
+ifeq ($(origin DC),environment)
+DC := ldmd2
+else
 DC ?= ldmd2
+endif
 MODE ?= DEBUG
 PREVIEWS := -preview=bitfields
 VERSIONS := -version=built_with_dub
