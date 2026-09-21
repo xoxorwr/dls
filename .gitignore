@@ -1,0 +1,26 @@
+# --- D build ---------------------------------------------------------------
+bin/
+dcd_templates/libdcd.*
+*.o
+
+# --- Python ----------------------------------------------------------------
+__pycache__/
+*.pyc
+
+# --- VS Code extension -----------------------------------------------------
+editors/vscode/node_modules/
+editors/vscode/out/
+editors/vscode/dist/
+editors/vscode/*.vsix
+
+# --- Zed extension ---------------------------------------------------------
+editors/zed/target/
+editors/zed/extension.wasm
+
+# --- Editor / tool scratch -------------------------------------------------
+.st/
+dcd_templates/.st/
+.vscode/
+.vs/
+/.agents/
+/.codex/
