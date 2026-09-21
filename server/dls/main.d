@@ -340,20 +340,290 @@ void lsp_initialize_params(int id, C.cJSON* params_json)
 }
 
 /// The compiler's own import paths: always registered, whatever dls.json says.
-string[] default_import_paths() {
-    version (linux)
+///
+/// Auto-detected (inspired by serve-d):
+///   1. the `-I` paths from the dmd.conf/sc.ini next to the compiler executable
+///      (`%@P%` expands to that directory), or /etc/dmd.conf;
+///   2. otherwise, walk up from the executable for a source tree (release:
+///      `<root>/src/{druntime/import,phobos}`; dev: `<root>/druntime/import`;
+///      LDC: `<root>/import`);
+///   3. otherwise, the common system install locations.
+/// A candidate only counts if it really provides `object.d`: e.g. a file named
+/// `import` (ImageMagick ships `/usr/bin/import`) must not shadow the stdlib.
+string[] default_import_paths()
+{
+    string[] found;
+    auto exe = compiler_executable();
+    if (exe.length)
+    {
+        auto dir = dir_name(exe);
+        version (Windows)
+            immutable conf_name = "sc.ini";
+        else
+            immutable conf_name = "dmd.conf";
+        if (dir.length)
+        {
+            auto mark = found.length;
+            foreach (c; dmd_conf_imports(dir ~ "/" ~ conf_name, dir))
+                add_import_dir(found, c);
+            // Distro packages put it in /etc instead of next to the binary.
+            if (found.length == mark)
+                foreach (c; dmd_conf_imports("/etc/dmd.conf", dir))
+                    add_import_dir(found, c);
+            if (found.length != mark && !has_object_file(found[mark .. $]))
+                found.length = mark;
+
+            if (!found.length)
+            {
+                auto root = dir;
+                foreach (_; 0 .. 8)
+                {
+                    if (!root.length || root == "/" || root == ".")
+                        break;
+                    mark = found.length;
+                    // dmd layout first; if it resolves, this is the toolchain.
+                    add_import_dir(found, root ~ "/src/druntime/import");
+                    add_import_dir(found, root ~ "/src/phobos");
+                    add_import_dir(found, root ~ "/druntime/import");
+                    add_import_dir(found, root ~ "/druntime/src");
+                    add_import_dir(found, root ~ "/phobos"); // dev tree: sibling
+                    if (found.length != mark && has_object_file(found[mark .. $]))
+                        break;
+                    // ldc layout (druntime + phobos in one `import` dir).
+                    add_import_dir(found, root ~ "/import");
+                    if (found.length != mark && has_object_file(found[mark .. $]))
+                        break;
+                    // Not a stdlib (e.g. a file named `import`): undo and keep up.
+                    found.length = mark;
+                    root = parent_dir(root);
+                }
+            }
+        }
+    }
+    if (!found.length)
+        foreach (c; system_import_paths())
+            add_import_dir(found, c);
+    return found;
+}
+
+/// The D compiler to look next to: $DMD/$DC first (setup-dlang and the dlang
+/// installers export them), then the usual names on $PATH.
+private string compiler_executable()
+{
+    foreach (name; ["DMD", "DC"])
+    {
+        auto value = getenv(name.ptr);
+        if (value != null && value[0] != 0)
+            return cast(string) value[0 .. strlen(value)].idup;
+    }
+    foreach (name; ["dmd", "ldmd2", "ldc2"])
+        if (auto found = find_on_path(name))
+            return found;
+    return null;
+}
+
+/// The first file named 'name' found on $PATH, or null.
+private string find_on_path(const(char)[] name)
+{
+    auto path = getenv("PATH");
+    if (path == null)
+        return null;
+    auto list = path[0 .. strlen(path)];
+    version (Windows)
+        immutable separator = ';';
+    else
+        immutable separator = ':';
+
+    size_t start = 0;
+    while (start <= list.length)
+    {
+        size_t end = start;
+        while (end < list.length && list[end] != separator)
+            end++;
+        auto dir = list[start .. end];
+        if (dir.length)
+        {
+            auto candidate = dir ~ '/' ~ name;
+            if (path_exists(candidate))
+                return candidate.idup;
+            version (Windows)
+            {
+                auto exe = candidate ~ ".exe";
+                if (path_exists(exe))
+                    return exe.idup;
+            }
+        }
+        if (end >= list.length)
+            break;
+        start = end + 1;
+    }
+    return null;
+}
+
+/// The `-I` import paths from a dmd.conf/sc.ini, preferring [Environment64].
+private string[] dmd_conf_imports(const(char)[] conf_path, const(char)[] compiler_dir)
+{
+    auto conf_z = conf_path.dup ~ '\0';
+    auto file = fopen(conf_z.ptr, "rb");
+    if (file == null)
+        return null;
+
+    char[4096] line;
+    string any_flags, env64_flags;
+    bool in64 = false;
+    while (fgets(line.ptr, cast(int) line.length, file) != null)
+    {
+        auto text = str.strip(line[0 .. strlen(line.ptr)]);
+        if (text == "[Environment64]")
+        {
+            in64 = true;
+            continue;
+        }
+        if (text.length && text[0] == '[')
+        {
+            in64 = false;
+            continue;
+        }
+        if (text.length > 7 && text[0 .. 7] == "DFLAGS=")
+        {
+            if (!any_flags.length)
+                any_flags = text[7 .. $].idup;
+            if (in64)
+                env64_flags = text[7 .. $].idup;
+        }
+    }
+    fclose(file);
+
+    auto flags = env64_flags.length ? env64_flags : any_flags;
+    if (!flags.length)
+        return null;
+
+    string[] out_;
+    size_t i = 0;
+    while (i < flags.length)
+    {
+        while (i < flags.length && (flags[i] == ' ' || flags[i] == '\t'))
+            i++;
+        size_t start = i;
+        while (i < flags.length && flags[i] != ' ' && flags[i] != '\t')
+            i++;
+        auto token = flags[start .. i];
+        if (token.length <= 2 || token[0] != '-' || token[1] != 'I')
+            continue;
+        auto p = token[2 .. $];
+        if (p.length >= 2 && (p[0] == '"' || p[0] == '\'') && p[$ - 1] == p[0])
+            p = p[1 .. $ - 1];
+        auto expanded = expand_compiler_dir(p, compiler_dir);
+        if (expanded.length)
+            out_ ~= expanded;
+    }
+    return out_;
+}
+
+/// `%@P%` -> the compiler executable's directory (dmd's own expansion).
+private string expand_compiler_dir(const(char)[] path, const(char)[] compiler_dir)
+{
+    enum marker = "%@P%";
+    char[] out_;
+    size_t i = 0;
+    while (i < path.length)
+    {
+        if (i + marker.length <= path.length && path[i .. i + marker.length] == marker)
+        {
+            out_ ~= compiler_dir.dup;
+            i += marker.length;
+        }
+        else
+        {
+            out_ ~= path[i];
+            i++;
+        }
+    }
+    return out_.idup;
+}
+
+/// Whether any candidate directory actually contains the core `object.d`.
+private bool has_object_file(const(string)[] dirs)
+{
+    foreach (d; dirs)
+        if (path_exists(d ~ "/object.d"))
+            return true;
+    return false;
+}
+
+/// Adds 'dir' if it is an existing directory that is not in 'found' yet.
+private void add_import_dir(ref string[] found, const(char)[] dir)
+{
+    if (!dir.length || !path_exists(dir))
+        return;
+    foreach (existing; found)
+        if (existing == dir)
+            return;
+    found ~= dir.idup;
+}
+
+/// Whether 'path' exists (directories included - `fopen` would not do here).
+private bool path_exists(const(char)[] path)
+{
+    if (!path.length)
+        return false;
+    auto path_z = path.dup ~ '\0';
+    version (Windows)
+    {
+        import core.sys.windows.windows : GetFileAttributesA, INVALID_FILE_ATTRIBUTES;
+        return GetFileAttributesA(path_z.ptr) != INVALID_FILE_ATTRIBUTES;
+    }
+    else
+    {
+        import core.sys.posix.unistd : access, F_OK;
+        return access(path_z.ptr, F_OK) == 0;
+    }
+}
+
+/// 'path' without its last component, or null when there is none.
+private string dir_name(const(char)[] path)
+{
+    size_t end = path.length;
+    while (end > 0 && path[end - 1] != '/' && path[end - 1] != '\\')
+        end--;
+    return end == 0 ? null : path[0 .. end - 1].idup;
+}
+
+/// The directory holding 'path'.
+private string parent_dir(const(char)[] path)
+{
+    auto trimmed = path;
+    while (trimmed.length && (trimmed[$ - 1] == '/' || trimmed[$ - 1] == '\\'))
+        trimmed = trimmed[0 .. $ - 1];
+    size_t end = trimmed.length;
+    while (end > 0 && trimmed[end - 1] != '/' && trimmed[end - 1] != '\\')
+        end--;
+    return end == 0 ? null : trimmed[0 .. end - 1].idup;
+}
+
+/// The usual locations a distro or installer drops the stdlib in.
+private string[] system_import_paths()
+{
+    version (Windows)
         return [
-            "/usr/include/dlang/dmd/",
-            "/usr/include/dmd/druntime/import/",
-            "/usr/include/dmd/phobos/",
+            "c:/D/dmd2/src/druntime/import",
+            "c:/D/dmd2/src/phobos",
         ];
-    else version (Windows)
+    else version (OSX)
         return [
-            "c:/D/dmd2/src/druntime/import/",
-            "c:/D/dmd2/src/phobos/",
+            "/Library/D/dmd/src/druntime/import",
+            "/Library/D/dmd/src/phobos",
+            "/usr/local/include/dmd/druntime/import",
+            "/usr/local/include/dmd/phobos",
         ];
     else
-        return null;
+        return [
+            "/usr/include/dlang/dmd",
+            "/usr/include/dmd/druntime/import",
+            "/usr/include/dmd/phobos",
+            "/usr/local/include/dmd/druntime/import",
+            "/usr/local/include/dmd/phobos",
+        ];
 }
 
 /**
@@ -1361,4 +1631,3 @@ enum KStruct = 22;
 enum KEvent = 23;
 enum KOperator = 24;
 enum KTypeParameter = 25;
-

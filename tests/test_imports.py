@@ -1,18 +1,8 @@
 """Cross-module resolution through the configured import paths."""
 
 import os
-import time
-import unittest
 
 from harness import DlsTestCase, labels
-
-# Default paths registered by lsp_initialize_params (see main.d).
-SYSTEM_IMPORT_PATHS = (
-    "/usr/include/dlang/dmd/",
-    "/usr/include/dmd/druntime/import/",
-    "/usr/include/dmd/phobos/",
-)
-
 
 LIB = """module lib;
 
@@ -79,29 +69,36 @@ class ImportPathsRequireDlsJsonTests(DlsTestCase):
 
 
 class SystemImportPathsWithoutConfigTests(DlsTestCase):
-    """The druntime/phobos paths are registered even with no project paths."""
+    """The compiler's own import paths are registered even with no project paths.
+
+    They are auto-detected (dmd.conf, /etc/dmd.conf, a source tree above the
+    compiler binary, or a system location) - see default_import_paths() in
+    main.d - so a machine with a single toolchain still finds object.d.
+    """
 
     WRITE_DLS_JSON = False
     PROJECT = {"app.d": "module app;\n\nvoid main() {}\n"}
 
-    def wait_for_log(self, needle, timeout=10.0):
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if any(needle in line for line in self.client.stderr_lines()):
-                return True
-            time.sleep(0.05)
-        return False
+    def registered_import_paths(self):
+        """The paths the server logged as registered at initialize."""
+        marker = "adding import: "
+        paths = []
+        for line in self.client.stderr_lines():
+            at = line.find(marker)
+            if at != -1:
+                paths.append(line[at + len(marker):].strip())
+        return paths
 
-    @unittest.skipUnless(
-        any(os.path.isdir(path) for path in SYSTEM_IMPORT_PATHS),
-        "no system D import paths on this machine",
-    )
-    def test_system_import_paths_are_registered(self):
+    def test_the_standard_library_is_registered(self):
         doc = self.open_doc("app.d")
         doc.document_symbols()  # sync: the log below is written at initialize
 
-        expected = [path for path in SYSTEM_IMPORT_PATHS if os.path.isdir(path)]
+        registered = self.registered_import_paths()
         self.assertTrue(
-            any(self.wait_for_log(f"adding import: {path}") for path in expected),
-            f"none of {expected} were registered\n{self.client.stderr_tail()}",
+            any(
+                os.path.isfile(os.path.join(path, "object.d"))
+                for path in registered
+            ),
+            f"no registered import path holds object.d: {registered}\n"
+            + self.client.stderr_tail(),
         )
