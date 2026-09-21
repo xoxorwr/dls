@@ -4,20 +4,15 @@
 language](https://dlang.org/), built on a fork of
 [DCD](https://github.com/dlang-community/DCD).
 
-DCD's completion engine is linked straight into the server as a static library
-and called through `extern(C)` entry points: there is no daemon to start and no
-per-request IPC, so completion, hover, go-to-definition and friends resolve
-in-process, against the same symbol engine DCD uses.
 
-> **Work in progress.** Expect rough edges; the end-to-end suite under
-> [`tests/`](tests/) is the most accurate description of what works today.
+> **Work in progress.**
 
 - **Completion**, including template instances, UFCS, `alias this` and `.ENUM`
 - **Hover**, **go to definition**, **document symbols**, **signature help**
 - **Diagnostics** from your own checkers, published on save and on external change
 - **Editor agnostic**: one watched `dls.json` at the workspace root; the server
   reads nothing from the client
-- A single binary with the D runtime linked in - no daemon, no sockets
+- A single static binary with the D runtime linked in - no daemon, no sockets
 
 ![Template completion in dls](docs/templates.png)
 
