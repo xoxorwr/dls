@@ -10,8 +10,7 @@
 # through extern(C) entry points.  Both halves must be built by the same
 # compiler so they share one D runtime - a mismatched pair fails to link with
 # undefined `_d_*` symbols - so DC is handed down to the dcd makefile.  It
-# defaults to ldmd2, LDC's dmd-compatible driver, which is what the dmd-style
-# flags below (`-P=`, compiling the bundled C file) need.
+# defaults to ldmd2, LDC's dmd-compatible driver.
 
 ifeq ($(origin DC),environment)
 DC := ldmd2
@@ -20,9 +19,6 @@ DC ?= ldmd2
 endif
 MODE ?= DEBUG
 PREVIEWS := -preview=rvaluerefparam -preview=bitfields
-# cJSON is C: the D compiler preprocesses it in place, which wants the GNU
-# dialect for the bundled source.
-CPPFLAGS := -P=-E -P=-std=gnu11
 
 ifeq ($(OS),Windows_NT)
     EXE := .exe
@@ -51,8 +47,8 @@ dcd:
 # The server, linked against the DCD library -> bin/dls[.exe].
 dls: dcd
 	@mkdir -p bin
-	$(DC) -of=bin/dls$(EXE) $(OPTIMIZE) $(PREVIEWS) $(CPPFLAGS) -i -Iserver/ \
-	    server/cjson/cJSON.c server/dls/main.d $(DCDLIB)
+	$(DC) -of=bin/dls$(EXE) $(OPTIMIZE) $(PREVIEWS) -i -Iserver/ \
+	    server/dls/main.d $(DCDLIB)
 
 test: dls
 	python3 run_tests.py

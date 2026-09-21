@@ -207,6 +207,33 @@ class AbsoluteGlobFallbackTests(RegistrationTestCase):
         self.assertEqual(registrations["dls-watch-config"], [f"{self.root}/dls.json"])
 
 
+class NonBooleanCapabilityTests(RegistrationTestCase):
+    """Only a boolean 'true' asks for the watchers.
+
+    The capability is read out of the client's JSON, where a field can hold
+    anything: a client that spells the flag "yes" (or 1, or an object) must
+    not be taken as one that can register watchers, or the server sends a
+    request the client cannot honour.
+    """
+
+    CLIENT_CAPABILITIES = {
+        "workspace": {
+            "didChangeWatchedFiles": {
+                "dynamicRegistration": "yes",
+                "relativePatternSupport": 1,
+            }
+        }
+    }
+
+    def test_a_truthy_flag_does_not_enable_the_watchers(self):
+        # The registration would have been sent while handling the handshake's
+        # 'initialized'; the request below is answered after that, so what the
+        # client has seen by then is what the server sent.
+        doc = self.open_doc("app.d")
+        self.assertIn("main", {symbol["name"] for symbol in doc.document_symbols()})
+        self.assertEqual(self.client.notifications("client/registerCapability"), [])
+
+
 class LeafProjectMixin:
     """A project whose ``leaf.d`` is imported by ``app_si.d`` / ``app_ex.d``."""
 

@@ -3,7 +3,7 @@ module dls.semantic_tokens;
 
 import rt.dbg;
 import mem = rt.memz;
-import cjson = cjson;
+import rt.json;
 import rt.str;
 
 import core.stdc.stdio;
@@ -15,17 +15,16 @@ import dls.main;
 import dls.io;
 import dls.dcd;
 
-void lsp_semantic_tokens(int id, cjson.cJSON * params_json, bool full) {
-    char* output = cjson.cJSON_Print(params_json);
+void lsp_semantic_tokens(int id, JsonNode * params_json, bool full) {
+    auto output = printJsonStr(params_json);
     LINFO("{} {}", full, output);
 
     return;
 
     auto allocator = arena.allocator();
 
-    auto text_document_json = cjson.cJSON_GetObjectItem(params_json, "textDocument");
-    auto uri_json = cjson.cJSON_GetObjectItem(text_document_json, "uri");
-    char* uri = cjson.cJSON_GetStringValue(uri_json);
+    auto text_document_json = json.get_object_item(params_json, "textDocument");
+    char* uri = json_string_item(text_document_json, "uri");
 
     Position start;
     Position end;
@@ -44,8 +43,8 @@ void lsp_semantic_tokens(int id, cjson.cJSON * params_json, bool full) {
     {
         auto symbols = dcd_document_symbols_sem(uri, buffer.content);
 
-        auto obj = cjson.cJSON_CreateObject();
-        auto root = cjson.cJSON_AddArrayToObject(obj, "data");
+        auto obj = json.create_object();
+        auto root = json.add_array_to_object(obj, "data");
         int start_l = -1;
         int start_c = -1;
 
@@ -83,12 +82,12 @@ void lsp_semantic_tokens(int id, cjson.cJSON * params_json, bool full) {
                 LINFO("{} {} {}:{} -d-> {}:{}", info.name, info.range[0], s.line, s.character, start_l, start_c);
 
 
-                cjson.cJSON_AddItemToArray(root, cjson.cJSON_CreateNumber(start_l));
-                cjson.cJSON_AddItemToArray(root, cjson.cJSON_CreateNumber(start_c));
+                json.add_item_to_array(root, json.create_number(start_l));
+                json.add_item_to_array(root, json.create_number(start_c));
 
-                cjson.cJSON_AddItemToArray(root, cjson.cJSON_CreateNumber(info.name.length)); // length
-                cjson.cJSON_AddItemToArray(root, cjson.cJSON_CreateNumber(type)); // type
-                cjson.cJSON_AddItemToArray(root, cjson.cJSON_CreateNumber(1)); // mod
+                json.add_item_to_array(root, json.create_number(info.name.length)); // length
+                json.add_item_to_array(root, json.create_number(type)); // type
+                json.add_item_to_array(root, json.create_number(1)); // mod
             }
 
             foreach(c; info.children)
@@ -101,7 +100,7 @@ void lsp_semantic_tokens(int id, cjson.cJSON * params_json, bool full) {
             add_info(&sym);
         }
 
-        LINFO("{}", cjson.cJSON_Print(obj));
+        LINFO("{}", printJsonStr(obj));
         lsp_send_response(id, obj);
     }
 

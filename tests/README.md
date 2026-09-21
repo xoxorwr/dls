@@ -37,7 +37,7 @@ far the most expensive part of a run.
 | `test_signature_help.py` | overloads, parameters, active parameter |
 | `test_diagnostics.py` | the `check` command pipeline in `dls.json` |
 | `test_document_sync.py` | didOpen/didChange/didSave/didClose, open-document table |
-| `test_notification_robustness.py` | malformed/late notifications and unopened documents |
+| `test_notification_robustness.py` | malformed, late or wrongly-typed notifications and unopened documents |
 | `test_save_flow.py` | save cost contract: identical text must not re-parse |
 | `test_imports.py` | cross-module resolution through import paths |
 | `test_public_imports.py` | `public import` re-exports, private imports do not |
@@ -184,7 +184,11 @@ table is keyed by URI and re-opening replaces the text rather than adding a
 second entry).  Requests for an unopened document answer with an empty result
 instead of aborting.  `didSave` also accepts the document text from the
 request (`save.includeText`), so a save that arrives after the buffer was
-closed still updates the cache.
+closed still updates the cache.  `JsonShapeTests` covers the same contract for
+fields whose *type* is wrong (a URI that isn't a string, a position that isn't
+a number, `contentChanges` that isn't a list): each one has to read as absent,
+never reach a JSON accessor that assumes it is there, and leave the document's
+text alone.
 
 ## Order-independence sweep
 

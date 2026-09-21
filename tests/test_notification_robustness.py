@@ -1,4 +1,4 @@
-"""Late or malformed notifications must never take the server down.
+"""Late, malformed or wrongly-typed notifications must never take the server down.
 
 A language server sees notifications it did not ask for: a save that arrives
 after the document was closed, a client that saves a file it never opened, a
@@ -9,6 +9,12 @@ restarts the server.
 
 Each test sends the odd notification, then sends a normal request: the request
 must still be answered, and the server must still be alive afterwards.
+
+``JsonShapeTests`` covers the other half of the same contract: a field whose
+*type* is wrong (a URI that isn't a string, a position that isn't a number, a
+capability flag that isn't a boolean) has to read as absent rather than as
+garbage -- every handler looks its fields up through the JSON reader, and a
+missing node must never reach an asserting accessor.
 """
 
 import os
@@ -178,3 +184,58 @@ class UnopenedDocumentRequestTests(DlsTestCase):
         doc = self.open_doc("app.d")
         self.assertEqual(self.client.document_symbols(self.ghost_uri), [])
         self.assertIn("size", labels(doc.completion("w.si")["items"]))
+
+
+class JsonShapeTests(DlsTestCase):
+    """A field of the wrong type reads as absent, not as garbage.
+
+    The client is not always right: a URI can arrive as a number, a position
+    as a string, "contentChanges" as an object.  Each of these used to reach a
+    lookup that only checked for the *presence* of the field, so the wrong
+    type turned into a null dereference or a nonsense offset.
+    """
+
+    PROJECT = {"app.d": APP, "lib.d": LIB}
+
+    def assert_server_still_works(self, doc):
+        self.assertIn("size", labels(doc.completion("w.si")["items"]))
+        self.assertIsNone(self.client.process.poll(), "server is not running")
+
+    def test_completion_with_a_uri_that_is_not_a_string(self):
+        doc = self.open_doc("app.d")
+        result = self.client.request(
+            "textDocument/completion",
+            {"textDocument": {"uri": 42}, "position": {"line": 0, "character": 0}},
+        )
+        self.assertEqual(result["items"], [])
+        self.assert_server_still_works(doc)
+
+    def test_completion_with_a_position_that_is_not_a_number(self):
+        doc = self.open_doc("app.d")
+        result = self.client.completion(doc.uri, "0", "0")
+        self.assertEqual(result["items"], [])
+        self.assert_server_still_works(doc)
+
+    def test_did_change_without_content_changes(self):
+        doc = self.open_app_and_keep_the_buffer()
+        for changes in (None, [], {"text": "module app;\n"}, [{"text": 7}]):
+            params = {"textDocument": {"uri": doc.uri, "version": 2}}
+            if changes is not None:
+                params["contentChanges"] = changes
+            self.client.notify("textDocument/didChange", params)
+            self.assert_server_still_works(doc)
+
+    def test_watched_file_change_without_a_usable_uri(self):
+        doc = self.open_app_and_keep_the_buffer()
+        self.client.notify(
+            "workspace/didChangeWatchedFiles",
+            {"changes": [{}, {"uri": 3, "type": "2"}, {"uri": doc.uri, "type": "2"}]},
+        )
+        self.assert_server_still_works(doc)
+
+    def open_app_and_keep_the_buffer(self):
+        """Open 'app.d' without registering a cleanup close for every test."""
+        doc = self.doc("app.d")
+        doc.open()
+        self.addCleanup(doc.close)
+        return doc

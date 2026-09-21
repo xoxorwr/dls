@@ -5,11 +5,7 @@ import str = rt.str;
 import args = rt.args;
 import mem = rt.memz;
 import fs = rt.filesystem;
-
-struct C
-{
-    public import cjson;
-}
+import rt.json;
 
 import core.stdc.stdio;
 import core.stdc.stdlib;
@@ -29,6 +25,13 @@ import dls.semantic_tokens;
 __gshared:
 
 mem.ArenaAllocator arena;
+
+/**
+ * The JSON reader and builder every request goes through.  Nodes are
+ * allocated from 'arena', so the 'dispose' at the end of a request reclaims
+ * the request, the response and everything in between in one go.
+ */
+Json json;
 
 /**
  * Allocator for data that outlives a request frame (document buffers, cached
@@ -78,14 +81,6 @@ bool g_client_supports_relative_patterns = false;
  */
 string[] g_import_paths;
 
-
-extern(C) void* j_alloc(size_t sz) {
-    return arena.alloc(sz).ptr;
-}
-
-extern(C) void j_free(void* ptr) {
-}
-
 extern(C) void main(int argc, char** argv) {
 
     LOG_FLAG.info = false;
@@ -96,26 +91,24 @@ extern(C) void main(int argc, char** argv) {
     rt_register_crash_handler();
 
     arena = mem.ArenaAllocator.create(heap_allocator);
+    // 'arena.allocator()' wraps the arena itself, so this stays valid across
+    // the 'dispose' that ends every request.
+    json = Json.create(arena.allocator());
     // TODO: remove this
     //  - auto detect dmd/ldc
     //  - config for other folders
 
-    C.cJSON_Hooks hooks;
-    hooks.malloc_fn = &j_alloc;
-    hooks.free_fn = &j_free;
-    C.cJSON_InitHooks(&hooks);
-
     //test
     //{
-    //    C.cJSON* request = C.cJSON_Parse(TEST_DIDOPEN.ptr);
+    //    auto request = json.parse(TEST_DIDOPEN);
     //    handle_request(request);
     //}
     //{
-    //    C.cJSON* request = C.cJSON_Parse(TEST_DIDCHANGE.ptr);
+    //    auto request = json.parse(TEST_DIDCHANGE);
     //    handle_request(request);
     //}
     //{
-    //    C.cJSON* request = C.cJSON_Parse(TEST_COMPLETION.ptr);
+    //    auto request = json.parse(TEST_COMPLETION);
     //    handle_request(request);
     //}
     //{
@@ -172,10 +165,11 @@ size_t parse_header() {
     }
 }
 
-C.cJSON* parse_content(mem.Allocator alloc, size_t len) {
+JsonNode* parse_content(mem.Allocator alloc, size_t len) {
     if (len == 0) return null;
 
-    // Allocate len + 1 to ensure space for a null terminator
+    // Allocate len + 1 so the bytes can be NUL-terminated; the parser takes
+    // the length, but C strings are what the rest of the server passes around.
     char[] buffer = alloc.alloc!(char)(len + 1);
     if (buffer.ptr == null) exit(1);
 
@@ -187,21 +181,20 @@ C.cJSON* parse_content(mem.Allocator alloc, size_t len) {
         return null;
     }
 
-    // CRITICAL: cJSON_Parse requires a null-terminated string
     buffer[len] = '\0';
 
     // Debug: Log the first few chars to ensure it's actually JSON
     // LINFO("JSON Start: {s}", buffer[0 .. (len > 20 ? 20 : len)]);
 
-    return C.cJSON_Parse(buffer.ptr);
+    return json.parse(buffer[0 .. len]);
 }
 
-void handle_request(C.cJSON* request) {
+void handle_request(JsonNode* request) {
     int id = -1;
     char* method;
 
-    auto method_json = C.cJSON_GetObjectItem(request, "method");
-    if (!C.cJSON_IsString(method_json)) {
+    auto method_json = json.get_object_item(request, "method");
+    if (!json_is_string(method_json)) {
         // A message without a method is a response to a request the server
         // sent (a file-watcher registration, say).  There is nothing to
         // dispatch here, and killing the process over it would cost the
@@ -209,14 +202,13 @@ void handle_request(C.cJSON* request) {
         LWARN("ignoring client response (no method)");
         return;
     }
-    method = method_json.valuestring;
+    method = json.get_string(method_json);
 
-    auto id_json = C.cJSON_GetObjectItem(request, "id");
-    if (C.cJSON_IsNumber(id_json)) {
-        id = id_json.valueint;
-    }
+    auto id_json = json.get_object_item(request, "id");
+    if (json_is_number(id_json))
+        id = json.get_integer(id_json);
 
-    auto params_json = C.cJSON_GetObjectItem(request, "params");
+    auto params_json = json.get_object_item(request, "params");
 
      LINFO("request id: {} -> method: {}", id, method);
 
@@ -274,21 +266,17 @@ void handle_request(C.cJSON* request) {
     {
         LWARN("request '{}' not handled", method);
         if (params_json)
-        {
-            char* output = C.cJSON_Print(params_json);
-            LWARN("{}", output);
-        }
+            LWARN("{}", printJsonStr(params_json));
     }
 }
 
 
-void lsp_initialize_params(int id, C.cJSON* params_json)
+void lsp_initialize_params(int id, JsonNode* params_json)
 {
-    char* output = C.cJSON_Print(params_json);
-    LINFO("lsp_initialize_params:\n{}", output);
+    LINFO("lsp_initialize_params:\n{}", printJsonStr(params_json));
     dcd_init();
-    auto rootPath_json = C.cJSON_GetObjectItem(params_json, "rootPath");
-    auto rootURI_json = C.cJSON_GetObjectItem(params_json, "rootUri");
+    auto rootPath_json = json.get_object_item(params_json, "rootPath");
+    auto rootURI_json = json.get_object_item(params_json, "rootUri");
 
     bool foundRoot = false;
 
@@ -315,14 +303,22 @@ void lsp_initialize_params(int id, C.cJSON* params_json)
     }
 
 	if (rootPath_json) {
-	        auto rootPath = C.cJSON_GetStringValue(rootPath_json);
+	        auto rootPath = json_string(rootPath_json);
+	        if (rootPath == null) {
+	            LWARN("rootPath is not a string");
+	            return;
+	        }
 	        auto L_r = strlen(rootPath);
 	        if (L_r < g_root_path.length) {
 	            mem.memcpy(g_root_path.ptr, rootPath, L_r);
 	            g_root_path[L_r] = 0; // Null terminate
 	        }
 	    } else if (rootURI_json) {
-	        auto rootPath = C.cJSON_GetStringValue(rootURI_json);
+	        auto rootPath = json_string(rootURI_json);
+	        if (rootPath == null) {
+	            LWARN("rootUri is not a string");
+	            return;
+	        }
 	        auto L_r = strlen(rootPath);
 	        // Strip "file://" (7 chars) and ensure it fits
 	        if (L_r > 7 && (L_r - 7) < g_root_path.length) {
@@ -661,7 +657,7 @@ ConfigReload apply_dls_json() {
     // the previous file.
     g_checkers_count = 0;
 
-    C.cJSON* importPaths_json = null;
+    JsonNode* importPaths_json = null;
     if (text is null)
     {
         LWARN("no dls.json at '{}': only the default import paths are registered", dlsJsonPath);
@@ -669,24 +665,24 @@ ConfigReload apply_dls_json() {
     else
     {
         LWARN("applying dls.json: {}", dlsJsonPath);
-        C.cJSON* root_json = C.cJSON_Parse(text.ptr);
+        auto root_json = json.parse(text);
 
         if (!root_json)
         {
             LWARN("{s}", text);
-            LWARN("parse error near: {s}", C.cJSON_GetErrorPtr());
+            LWARN("parse error near: {}", get_error_ptr());
             LWARN("failed to parse dls.json");
         }
         else
         {
-            importPaths_json = C.cJSON_GetObjectItem(root_json, "importPaths");
+            importPaths_json = json.get_object_item(root_json, "importPaths");
             if (!importPaths_json)
                 LWARN("no importPaths in dls.json");
 
-            auto check_json = C.cJSON_GetObjectItem(root_json, "check");
-            if (check_json && C.cJSON_IsArray(check_json))
+            auto check_json = json.get_object_item(root_json, "check");
+            if (json_is_array(check_json))
             {
-                int c = C.cJSON_GetArraySize(check_json);
+                int c = json.get_array_size(check_json);
                 LWARN("init: has {} checks", c);
                 for (int i = 0; i < c; i++)
                 {
@@ -698,14 +694,14 @@ ConfigReload apply_dls_json() {
                         break;
                     }
 
-                    auto item = C.cJSON_GetArrayItem(check_json, i);
+                    auto item = json.get_array_item(check_json, i);
                     auto check = &g_checkers[g_checkers_count];
                     g_checkers_count++;
 
-                    auto path_obj = C.cJSON_GetObjectItem(item, "path");
-                    if (C.cJSON_IsString(path_obj))
+                    auto path_obj = json.get_object_item(item, "path");
+                    if (json_is_string(path_obj))
                     {
-                        const char* str = path_obj.valuestring;
+                        const char* str = json.get_string(path_obj);
                         size_t strLen = strlen(str);
                         if (strLen < check.path.length) {
                             mem.memcpy(check.path.ptr, str, strLen);
@@ -713,10 +709,10 @@ ConfigReload apply_dls_json() {
                         }
                     }
 
-                    auto cmd_obj = C.cJSON_GetObjectItem(item, "cmd");
-                    if (C.cJSON_IsString(cmd_obj))
+                    auto cmd_obj = json.get_object_item(item, "cmd");
+                    if (json_is_string(cmd_obj))
                     {
-                        const char* str = cmd_obj.valuestring;
+                        const char* str = json.get_string(cmd_obj);
                         size_t strLen = strlen(str);
                         if (strLen < check.cmd.length) {
                             mem.memcpy(check.cmd.ptr, str, strLen);
@@ -736,15 +732,17 @@ ConfigReload apply_dls_json() {
     string[] projectPaths;
     if (importPaths_json)
     {
-        int size = C.cJSON_GetArraySize(importPaths_json);
+        int size = json.get_array_size(importPaths_json);
         LWARN("import paths: {}", size);
 
         projectPaths = arena.allocator().alloc!(string)(size + 1);
         size_t count = 0;
         for (int i = 0; i < size; i++)
         {
-            auto item = C.cJSON_GetArrayItem(importPaths_json, i);
-            auto str = C.cJSON_GetStringValue(item);
+            auto item = json.get_array_item(importPaths_json, i);
+            auto str = json_string(item);
+            if (str == null)
+                continue;
             auto L_it = strlen(str);
 
             // An empty entry is not a path; a one-character one ('a', '/') is.
@@ -815,9 +813,8 @@ struct ConfigReload
 __gshared bool g_dls_json_applied;
 __gshared char[] g_dls_json_text;
 
-/// Reads '<root>/dls.json' into 'alloc' - the returned slice is
-/// null-terminated (cJSON wants a C string) - or returns null when it is
-/// absent.
+/// Reads '<root>/dls.json' into 'alloc' - the returned slice is null
+/// terminated - or returns null when it is absent.
 char[] read_dls_json(const(char)[] path, mem.Allocator alloc) {
     fs.File file;
     if (!file.open(path))
@@ -893,14 +890,11 @@ void lsp_exit() {
     exit(0);
 }
 
-void lsp_sync_open(C.cJSON* params_json) {
-    auto text_document_json = C.cJSON_GetObjectItem(params_json, "textDocument");
+void lsp_sync_open(JsonNode* params_json) {
+    auto text_document_json = json.get_object_item(params_json, "textDocument");
 
-    auto uri_json = C.cJSON_GetObjectItem(text_document_json, "uri");
-    char* uri = C.cJSON_GetStringValue(uri_json);
-
-    auto text_json = C.cJSON_GetObjectItem(text_document_json, "text");
-    char* text = C.cJSON_GetStringValue(text_json);
+    char* uri = json_string_item(text_document_json, "uri");
+    char* text = json_string_item(text_document_json, "text");
 
     if (uri == null) {
         LWARN("didOpen without a uri");
@@ -919,16 +913,14 @@ void lsp_sync_open(C.cJSON* params_json) {
     LWARN("lsp_sync_open: {}", uri);
     dcd_on_open(uri, buffer.content);
 }
-void lsp_sync_change(C.cJSON* params_json) {
-    auto text_document_json = C.cJSON_GetObjectItem(params_json, "textDocument");
+void lsp_sync_change(JsonNode* params_json) {
+    auto text_document_json = json.get_object_item(params_json, "textDocument");
 
-    auto uri_json = C.cJSON_GetObjectItem(text_document_json, "uri");
-    char* uri = C.cJSON_GetStringValue(uri_json);
+    char* uri = json_string_item(text_document_json, "uri");
 
-    auto content_changes_json = C.cJSON_GetObjectItem(params_json, "contentChanges");
-    auto content_change_json = C.cJSON_GetArrayItem(content_changes_json, 0);
-    auto text_json = C.cJSON_GetObjectItem(content_change_json, "text");
-    char* text = C.cJSON_GetStringValue(text_json);
+    auto content_changes_json = json.get_object_item(params_json, "contentChanges");
+    auto content_change_json = json.get_array_item(content_changes_json, 0);
+    char* text = json_string_item(content_change_json, "text");
 
     if (uri == null) {
         LWARN("didChange without a uri");
@@ -948,11 +940,10 @@ void lsp_sync_change(C.cJSON* params_json) {
     lsp_lint(buffer);
 }
 
-void lsp_sync_close(C.cJSON* params_json) {
-    auto text_document_json = C.cJSON_GetObjectItem(params_json, "textDocument");
+void lsp_sync_close(JsonNode* params_json) {
+    auto text_document_json = json.get_object_item(params_json, "textDocument");
 
-    auto uri_json = C.cJSON_GetObjectItem(text_document_json, "uri");
-    char* uri = C.cJSON_GetStringValue(uri_json);
+    char* uri = json_string_item(text_document_json, "uri");
 
     if (uri == null) {
         LWARN("didClose without a uri");
@@ -963,11 +954,10 @@ void lsp_sync_close(C.cJSON* params_json) {
     lsp_lint_clear(uri);
 }
 
-void lsp_did_save(C.cJSON* params_json) {
-    auto text_document_json = C.cJSON_GetObjectItem(params_json, "textDocument");
+void lsp_did_save(JsonNode* params_json) {
+    auto text_document_json = json.get_object_item(params_json, "textDocument");
 
-    auto uri_json = C.cJSON_GetObjectItem(text_document_json, "uri");
-    char* uri = C.cJSON_GetStringValue(uri_json);
+    char* uri = json_string_item(text_document_json, "uri");
 
     if (uri == null) {
         LWARN("didSave without a uri");
@@ -981,9 +971,9 @@ void lsp_did_save(C.cJSON* params_json) {
         // The document isn't open (saved after a close, or never opened in
         // this session).  Prefer the text the client sent - the capabilities
         // ask for it via save.includeText - and fall back to the file itself.
-        char* text = C.cJSON_GetStringValue(C.cJSON_GetObjectItem(params_json, "text"));
+        char* text = json_string_item(params_json, "text");
         if (text == null)
-            text = C.cJSON_GetStringValue(C.cJSON_GetObjectItem(text_document_json, "text"));
+            text = json_string_item(text_document_json, "text");
 
         buffer = open_buffer(heap_allocator, uri, text);
         if (buffer.content == null)
@@ -1108,7 +1098,7 @@ const(char)[] make_dls_json_path(mem.Allocator alloc) {
     return buffer[0 .. root.length + 1 + name.length];
 }
 
-/// 'text' as a null-terminated string in 'alloc' (cJSON takes C strings).
+/// 'text' as a null-terminated string in 'alloc'.
 char* make_cstring(mem.Allocator alloc, const(char)[] text) {
     auto buffer = alloc.alloc!char(text.length + 1);
     if (buffer.length != text.length + 1) return null;
@@ -1183,26 +1173,26 @@ enum FILE_CHANGE_DELETED = 3;
  * nothing else tells the cache that a file on disk moved on: a lookup hands
  * back the cached symbol without ever comparing modification times.
  */
-void lsp_did_change_watched_files(C.cJSON* params_json) {
-    auto changes_json = C.cJSON_GetObjectItem(params_json, "changes");
-    if (!C.cJSON_IsArray(changes_json)) {
+void lsp_did_change_watched_files(JsonNode* params_json) {
+    auto changes_json = json.get_object_item(params_json, "changes");
+    if (!json_is_array(changes_json)) {
         LWARN("didChangeWatchedFiles without a changes array");
         return;
     }
 
-    int size = C.cJSON_GetArraySize(changes_json);
+    int size = json.get_array_size(changes_json);
     for (int i = 0; i < size; i++) {
-        auto change_json = C.cJSON_GetArrayItem(changes_json, i);
-        auto uri_json = C.cJSON_GetObjectItem(change_json, "uri");
-        auto type_json = C.cJSON_GetObjectItem(change_json, "type");
+        auto change_json = json.get_array_item(changes_json, i);
+        auto uri_json = json.get_object_item(change_json, "uri");
+        auto type_json = json.get_object_item(change_json, "type");
 
-        if (!C.cJSON_IsString(uri_json)) {
+        if (!json_is_string(uri_json)) {
             LWARN("didChangeWatchedFiles change without a uri");
             continue;
         }
-        char* uri = C.cJSON_GetStringValue(uri_json);
+        char* uri = json.get_string(uri_json);
 
-        int type = C.cJSON_IsNumber(type_json) ? type_json.valueint : FILE_CHANGE_CHANGED;
+        int type = json_int(type_json, FILE_CHANGE_CHANGED);
 
         // Two watchers can cover the same file when a path is nested in
         // another one, and a client is free to report a write twice.
@@ -1245,10 +1235,10 @@ void lsp_did_change_watched_files(C.cJSON* params_json) {
 }
 
 /// True when a change before 'index' in the same notification names 'uri'.
-bool reported_earlier(C.cJSON* changes_json, int index, const char* uri) {
+bool reported_earlier(JsonNode* changes_json, int index, const char* uri) {
     for (int i = 0; i < index; i++) {
-        auto change_json = C.cJSON_GetArrayItem(changes_json, i);
-        auto other = C.cJSON_GetStringValue(C.cJSON_GetObjectItem(change_json, "uri"));
+        auto change_json = json.get_array_item(changes_json, i);
+        auto other = json_string_item(change_json, "uri");
         if (other != null && strcmp(other, uri) == 0)
             return true;
     }
@@ -1292,42 +1282,41 @@ void reconcile_document(const char* uri) {
 }
 
 
-DOCUMENT_LOCATION lsp_parse_document(C.cJSON* params_json) {
+DOCUMENT_LOCATION lsp_parse_document(JsonNode* params_json) {
     DOCUMENT_LOCATION document;
 
-    auto text_document_json = C.cJSON_GetObjectItem(params_json, "textDocument");
-    auto uri_json = C.cJSON_GetObjectItem(text_document_json, "uri");
-    document.uri = C.cJSON_GetStringValue(uri_json);
+    auto text_document_json = json.get_object_item(params_json, "textDocument");
+    document.uri = json_string_item(text_document_json, "uri");
     if (document.uri == null) {
         LWARN("request without textDocument.uri");
         return DOCUMENT_LOCATION.init;
     }
 
-    auto position_json = C.cJSON_GetObjectItem(params_json, "position");
-    auto line_json = C.cJSON_GetObjectItem(position_json, "line");
-    if (!C.cJSON_IsNumber(line_json)) {
+    auto position_json = json.get_object_item(params_json, "position");
+    auto line_json = json.get_object_item(position_json, "line");
+    if (!json_is_number(line_json)) {
         LWARN("request for '{}' without a valid position", document.uri);
         return DOCUMENT_LOCATION.init;
     }
-    document.line = line_json.valueint;
-    auto character_json = C.cJSON_GetObjectItem(position_json, "character");
-    if (!C.cJSON_IsNumber(character_json)) {
+    document.line = json.get_integer(line_json);
+    auto character_json = json.get_object_item(position_json, "character");
+    if (!json_is_number(character_json)) {
         LWARN("request for '{}' without a valid position", document.uri);
         return DOCUMENT_LOCATION.init;
     }
-    document.character = character_json.valueint;
+    document.character = json.get_integer(character_json);
 
     return document;
 }
 
-void lsp_send_response(int id, C.cJSON* result) {
-    auto response = C.cJSON_CreateObject();
-    C.cJSON_AddStringToObject(response, "jsonrpc", "2.0");
-    C.cJSON_AddNumberToObject(response, "id", id);
+void lsp_send_response(int id, JsonNode* result) {
+    auto response = json.create_object();
+    json.add_string_to_object(response, "jsonrpc", "2.0");
+    json.add_number_to_object(response, "id", id);
     if (result != null)
-        C.cJSON_AddItemToObject(response, "result", result);
+        json.add_item_to_object(response, "result", result);
     else
-        C.cJSON_AddNullToObject(response, "result" );
+        json.add_null_to_object(response, "result");
 
     send_message(response);
 }
@@ -1339,33 +1328,34 @@ void lsp_send_response(int id, C.cJSON* result) {
  * nothing in the server waits for one.  'id' must come from
  * 'g_next_request_id' so it can't collide with a client request id.
  */
-void lsp_send_request(int id, const(char)* method, C.cJSON* params) {
-    auto request = C.cJSON_CreateObject();
-    C.cJSON_AddStringToObject(request, "jsonrpc", "2.0");
-    C.cJSON_AddNumberToObject(request, "id", id);
-    C.cJSON_AddStringToObject(request, "method", method);
+void lsp_send_request(int id, const(char)* method, JsonNode* params) {
+    auto request = json.create_object();
+    json.add_string_to_object(request, "jsonrpc", "2.0");
+    json.add_number_to_object(request, "id", id);
+    json.add_string_to_object(request, "method", method);
     if (params != null)
-        C.cJSON_AddItemToObject(request, "params", params);
+        json.add_item_to_object(request, "params", params);
     else
-        C.cJSON_AddNullToObject(request, "params");
+        json.add_null_to_object(request, "params");
 
     send_message(request);
 }
 
 /// Frames 'message' and writes it to stdout.
-void send_message(C.cJSON* message) {
-    char* output = C.cJSON_PrintUnformatted(message);
-    C.cJSON_Minify(output);
-    auto len = strlen(output);
+void send_message(JsonNode* message) {
+    // The printer already emits the compact form, so nothing is minified here.
+    auto output = printJsonStr(message);
+    char[64] header;
+    auto headerLen = snprintf(header.ptr, header.length, "Content-Length: %u\r\n\r\n",
+        cast(uint) output.length);
+    if (headerLen < 0 || cast(size_t) headerLen >= header.length)
+        LERRO("cannot frame a response of {} bytes", output.length);
 
-    char[] buffer = arena.allocator().alloc!(char)(len + 512);
-    buffer[] = '\0';
-
-    sprintf(buffer.ptr, "Content-Length: %u\r\n\r\n%s\0", cast(uint) len, output);
-    fwrite(buffer.ptr, 1, strlen(buffer.ptr), stdout);
+    fwrite(header.ptr, 1, headerLen, stdout);
+    fwrite(output.ptr, 1, output.length, stdout);
     fflush(stdout);
 
-    LINFO("sent:\n{}", buffer);
+    LINFO("sent:\n{}", output);
 }
 
 
@@ -1417,9 +1407,9 @@ void lsp_lint(BUFFER buffer) {
         return;
     }
 
-    auto params = C.cJSON_CreateObject();
-    C.cJSON_AddStringToObject(params, "uri", buffer.uri);
-    auto diagnostics = C.cJSON_AddArrayToObject(params, "diagnostics");
+    auto params = json.create_object();
+    json.add_string_to_object(params, "uri", buffer.uri);
+    auto diagnostics = json.add_array_to_object(params, "diagnostics");
 
     // 3. Execute the specific command found
     FILE* pipe = popen(cmd_to_run, "r");
@@ -1483,20 +1473,20 @@ void lsp_lint(BUFFER buffer) {
             if (lineNum > 0) lineNum--;
             if (colNum > 0) colNum--;
 
-            auto diagnostic = C.cJSON_CreateObject();
-            auto range = C.cJSON_AddObjectToObject(diagnostic, "range");
+            auto diagnostic = json.create_object();
+            auto range = json.add_object_to_object(diagnostic, "range");
 
-            auto start_position = C.cJSON_AddObjectToObject(range, "start");
-            C.cJSON_AddNumberToObject(start_position, "line", lineNum);
-            C.cJSON_AddNumberToObject(start_position, "character", colNum);
+            auto start_position = json.add_object_to_object(range, "start");
+            json.add_number_to_object(start_position, "line", lineNum);
+            json.add_number_to_object(start_position, "character", colNum);
 
-            auto end_position = C.cJSON_AddObjectToObject(range, "end");
-            C.cJSON_AddNumberToObject(end_position, "line", lineNum);
-            C.cJSON_AddNumberToObject(end_position, "character", colNum + 1);
+            auto end_position = json.add_object_to_object(range, "end");
+            json.add_number_to_object(end_position, "line", lineNum);
+            json.add_number_to_object(end_position, "character", colNum + 1);
 
-            C.cJSON_AddNumberToObject(diagnostic, "severity", severity);
-            C.cJSON_AddStringToObject(diagnostic, "message", p);
-            C.cJSON_AddItemToArray(diagnostics, diagnostic);
+            json.add_number_to_object(diagnostic, "severity", severity);
+            json.add_string_to_object(diagnostic, "message", p);
+            json.add_item_to_array(diagnostics, diagnostic);
         }
         pclose(pipe);
     } else {
@@ -1507,57 +1497,79 @@ void lsp_lint(BUFFER buffer) {
 }
 
 void lsp_lint_clear(const char *uri) {
-    auto params = C.cJSON_CreateObject();
-    C.cJSON_AddStringToObject(params, "uri", uri);
-    C.cJSON_AddArrayToObject(params, "diagnostics");
+    auto params = json.create_object();
+    json.add_string_to_object(params, "uri", uri);
+    json.add_array_to_object(params, "diagnostics");
     lsp_send_notification("textDocument/publishDiagnostics", params);
 }
 
 
-void lsp_send_notification(const(char)* method, C.cJSON* params)
+void lsp_send_notification(const(char)* method, JsonNode* params)
 {
-    auto notification = C.cJSON_CreateObject();
-    C.cJSON_AddStringToObject(notification, "jsonrpc", "2.0");
-    C.cJSON_AddStringToObject(notification, "method", method);
+    auto notification = json.create_object();
+    json.add_string_to_object(notification, "jsonrpc", "2.0");
+    json.add_string_to_object(notification, "method", method);
     if (params != null)
-        C.cJSON_AddItemToObject(notification, "params", params);
+        json.add_item_to_object(notification, "params", params);
     else
-        C.cJSON_AddNullToObject(notification, "params" );
+        json.add_null_to_object(notification, "params");
 
     send_message(notification);
 }
 
 // HELPERS
 
+/**
+ * A client is free to leave a field out - or to send the wrong type for one -
+ * and a handler has to read that as 'false' (or as a null string) instead of
+ * dying on it.  rt.json's own predicates and accessors assert that the node
+ * is there, so they are only ever reached through these.
+ */
+bool json_is_string(JsonNode* node) { return node !is null && json.is_string(node); }
+bool json_is_number(JsonNode* node) { return node !is null && json.is_number(node); }
+bool json_is_array(JsonNode* node) { return node !is null && json.is_array(node); }
+bool json_is_true(JsonNode* node) { return node !is null && json.is_true(node); }
 
-C.cJSON* create_range(C.cJSON* obj, const(char)* id, Position s, Position e)
+/// The text of a string node, or null when there is no node or it isn't one.
+char* json_string(JsonNode* node) {
+    return json_is_string(node) ? json.get_string(node) : null;
+}
+
+/// The number of an integer node, or 'fallback' when there is none.
+int json_int(JsonNode* node, int fallback) {
+    return json_is_number(node) ? json.get_integer(node) : fallback;
+}
+
+/// 'object.name' as a C string, or null when the name isn't there.
+char* json_string_item(JsonNode* object, const(char)* name) {
+    return json_string(json.get_object_item(object, name));
+}
+
+
+JsonNode* create_range(JsonNode* obj, const(char)* id, Position s, Position e)
 {
-    auto range = C.cJSON_AddObjectToObject(obj, id);
-    auto start = C.cJSON_AddObjectToObject(range, "start");
-    auto end = C.cJSON_AddObjectToObject(range, "end");
-    C.cJSON_AddNumberToObject(start, "line", s.line);
-    C.cJSON_AddNumberToObject(start, "character", s.character);
-    C.cJSON_AddNumberToObject(end, "line", e.line);
-    C.cJSON_AddNumberToObject(end, "character", e.character);
+    auto range = json.add_object_to_object(obj, id);
+    auto start = json.add_object_to_object(range, "start");
+    auto end = json.add_object_to_object(range, "end");
+    json.add_number_to_object(start, "line", s.line);
+    json.add_number_to_object(start, "character", s.character);
+    json.add_number_to_object(end, "line", e.line);
+    json.add_number_to_object(end, "character", e.character);
     return range;
 }
 
-bool get_range(C.cJSON* obj, Position* start, Position* end)
+bool get_range(JsonNode* obj, Position* start, Position* end)
 {
-    auto range_json = C.cJSON_GetObjectItem(obj, "range");
-    auto start_json = C.cJSON_GetObjectItem(range_json, "start");
-    auto end_json = C.cJSON_GetObjectItem(range_json, "end");
+    auto range_json = json.get_object_item(obj, "range");
+    auto start_json = json.get_object_item(range_json, "start");
+    auto end_json = json.get_object_item(range_json, "end");
     {
-        auto line_json = C.cJSON_GetObjectItem(start_json, "line");
-        auto char_json = C.cJSON_GetObjectItem(start_json, "character");
-        start.line = line_json.valueint;
-        start.character = char_json.valueint;
+        start.line = json_int(json.get_object_item(start_json, "line"), 0);
+        start.character = json_int(json.get_object_item(start_json, "character"), 0);
     }
     {
-        auto line_json = C.cJSON_GetObjectItem(end_json, "line");
-        auto char_json = C.cJSON_GetObjectItem(end_json, "character");
-        end.line = line_json.valueint;
-        end.character = char_json.valueint;
+        end.line = json_int(json.get_object_item(end_json, "line"), 0);
+        end.character = json_int(json.get_object_item(end_json, "character"), 0);
     }
     return true;
 }

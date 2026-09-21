@@ -1,7 +1,7 @@
 module dls.initialize;
 
 import rt.dbg;
-import c = cjson;
+import rt.json;
 
 import core.stdc.stdio;
 import core.stdc.stdlib;
@@ -13,18 +13,18 @@ import dls.main;
 
 
 
-void lsp_initialize(int id, c.cJSON* params_json) {
-    auto result = c.cJSON_CreateObject();
+void lsp_initialize(int id, JsonNode* params_json) {
+    auto result = json.create_object();
 
-    //auto capabilities = c.cJSON_AddObjectToObject(result, "capabilities");
-    //c.cJSON_AddNumberToObject(capabilities, "textDocumentSync", 1);
-    //c.cJSON_AddBoolToObject(capabilities, "hoverProvider", 1);
-    //c.cJSON_AddBoolToObject(capabilities, "definitionProvider", 1);
-    //c.cJSON_AddBoolToObject(capabilities, "documentSymbolProvider", 1);
+    //auto capabilities = json.add_object_to_object(result, "capabilities");
+    //json.add_number_to_object(capabilities, "textDocumentSync", 1);
+    //json.add_bool_to_object(capabilities, "hoverProvider", 1);
+    //json.add_bool_to_object(capabilities, "definitionProvider", 1);
+    //json.add_bool_to_object(capabilities, "documentSymbolProvider", 1);
 
-    //auto serverInfo = c.cJSON_AddObjectToObject(result, "serverInfo");
-    //c.cJSON_AddStringToObject(serverInfo, "name", "dls");
-    //c.cJSON_AddStringToObject(serverInfo, "version", "0.0.1");
+    //auto serverInfo = json.add_object_to_object(result, "serverInfo");
+    //json.add_string_to_object(serverInfo, "name", "dls");
+    //json.add_string_to_object(serverInfo, "version", "0.0.1");
 
 
     auto capabilities = result.add_object("capabilities")
@@ -34,11 +34,11 @@ void lsp_initialize(int id, c.cJSON* params_json) {
             .add_bool("documentSymbolProvider", 1);
 
 
-    auto sync = c.cJSON_AddObjectToObject(capabilities, "textDocumentSync");
-    c.cJSON_AddBoolToObject(sync, "openClose", 1);
-    c.cJSON_AddNumberToObject(sync, "change", 1);
-    auto saveOptions = c.cJSON_AddObjectToObject(sync, "save");
-    c.cJSON_AddBoolToObject(saveOptions, "includeText", 1);
+    auto sync = json.add_object_to_object(capabilities, "textDocumentSync");
+    json.add_bool_to_object(sync, "openClose", 1);
+    json.add_number_to_object(sync, "change", 1);
+    auto saveOptions = json.add_object_to_object(sync, "save");
+    json.add_bool_to_object(saveOptions, "includeText", 1);
 
     //enable_semantice_tokens(capabilities);
     enable_completion(capabilities);
@@ -62,15 +62,15 @@ void lsp_initialize(int id, c.cJSON* params_json) {
  * backwards).  The registration itself is sent from the 'initialized'
  * handler, once the client is ready for server requests.
  */
-void lsp_initialize_client_capabilities(c.cJSON* params_json) {
-    auto clientCapabilities = c.cJSON_GetObjectItem(params_json, "capabilities");
-    auto workspace_json = c.cJSON_GetObjectItem(clientCapabilities, "workspace");
-    auto watched_json = c.cJSON_GetObjectItem(workspace_json, "didChangeWatchedFiles");
-    auto dynamic_json = c.cJSON_GetObjectItem(watched_json, "dynamicRegistration");
-    auto relative_json = c.cJSON_GetObjectItem(watched_json, "relativePatternSupport");
+void lsp_initialize_client_capabilities(JsonNode* params_json) {
+    auto clientCapabilities = json.get_object_item(params_json, "capabilities");
+    auto workspace_json = json.get_object_item(clientCapabilities, "workspace");
+    auto watched_json = json.get_object_item(workspace_json, "didChangeWatchedFiles");
+    auto dynamic_json = json.get_object_item(watched_json, "dynamicRegistration");
+    auto relative_json = json.get_object_item(watched_json, "relativePatternSupport");
 
-    g_client_supports_watchers = c.cJSON_IsTrue(dynamic_json) != 0;
-    g_client_supports_relative_patterns = c.cJSON_IsTrue(relative_json) != 0;
+    g_client_supports_watchers = json_is_true(dynamic_json) != 0;
+    g_client_supports_relative_patterns = json_is_true(relative_json) != 0;
 
     if (!g_client_supports_watchers)
         LWARN("client can't register file watchers: modules changed outside the editor are only picked up on save");
@@ -107,18 +107,18 @@ void register_config_watcher() {
     if (g_root_path[0] == 0)
         return;
 
-    auto params = c.cJSON_CreateObject();
-    auto registrations = c.cJSON_AddArrayToObject(params, "registrations");
-    auto registration = c.cJSON_CreateObject();
-    c.cJSON_AddStringToObject(registration, "id", WATCH_CONFIG_ID);
-    c.cJSON_AddStringToObject(registration, "method", "workspace/didChangeWatchedFiles");
+    auto params = json.create_object();
+    auto registrations = json.add_array_to_object(params, "registrations");
+    auto registration = json.create_object();
+    json.add_string_to_object(registration, "id", WATCH_CONFIG_ID);
+    json.add_string_to_object(registration, "method", "workspace/didChangeWatchedFiles");
 
-    auto registerOptions = c.cJSON_AddObjectToObject(registration, "registerOptions");
-    auto watchers = c.cJSON_AddArrayToObject(registerOptions, "watchers");
-    auto watcher = c.cJSON_CreateObject();
+    auto registerOptions = json.add_object_to_object(registration, "registerOptions");
+    auto watchers = json.add_array_to_object(registerOptions, "watchers");
+    auto watcher = json.create_object();
     add_watcher(watcher, strip_trailing_separator(g_root_path[0 .. strlen(g_root_path.ptr)]), "dls.json");
-    c.cJSON_AddItemToArray(watchers, watcher);
-    c.cJSON_AddItemToArray(registrations, registration);
+    json.add_item_to_array(watchers, watcher);
+    json.add_item_to_array(registrations, registration);
 
     LWARN("watching dls.json for configuration changes");
     lsp_send_request(g_next_request_id++, "client/registerCapability", params);
@@ -144,23 +144,23 @@ void register_import_path_watchers() {
     if (g_import_paths.length == 0)
         return;
 
-    auto params = c.cJSON_CreateObject();
-    auto registrations = c.cJSON_AddArrayToObject(params, "registrations");
+    auto params = json.create_object();
+    auto registrations = json.add_array_to_object(params, "registrations");
 
-    auto registration = c.cJSON_CreateObject();
-    c.cJSON_AddStringToObject(registration, "id", WATCH_IMPORT_PATHS_ID);
-    c.cJSON_AddStringToObject(registration, "method", "workspace/didChangeWatchedFiles");
+    auto registration = json.create_object();
+    json.add_string_to_object(registration, "id", WATCH_IMPORT_PATHS_ID);
+    json.add_string_to_object(registration, "method", "workspace/didChangeWatchedFiles");
 
-    auto registerOptions = c.cJSON_AddObjectToObject(registration, "registerOptions");
-    auto watchers = c.cJSON_AddArrayToObject(registerOptions, "watchers");
+    auto registerOptions = json.add_object_to_object(registration, "registerOptions");
+    auto watchers = json.add_array_to_object(registerOptions, "watchers");
     foreach (importPath; g_import_paths)
     {
-        auto watcher = c.cJSON_CreateObject();
+        auto watcher = json.create_object();
         add_watcher(watcher, importPath, "**/*.d");
-        c.cJSON_AddItemToArray(watchers, watcher);
+        json.add_item_to_array(watchers, watcher);
     }
 
-    c.cJSON_AddItemToArray(registrations, registration);
+    json.add_item_to_array(registrations, registration);
 
     LWARN("watching {} import path(s) for D sources", g_import_paths.length);
     lsp_send_request(g_next_request_id++, "client/registerCapability", params);
@@ -183,12 +183,12 @@ void refresh_import_path_watchers() {
 }
 
 void unregister_watcher(const(char)* id) {
-    auto params = c.cJSON_CreateObject();
-    auto unregisterations = c.cJSON_AddArrayToObject(params, "unregisterations");
-    auto unregistration = c.cJSON_CreateObject();
-    c.cJSON_AddStringToObject(unregistration, "id", id);
-    c.cJSON_AddStringToObject(unregistration, "method", "workspace/didChangeWatchedFiles");
-    c.cJSON_AddItemToArray(unregisterations, unregistration);
+    auto params = json.create_object();
+    auto unregisterations = json.add_array_to_object(params, "unregisterations");
+    auto unregistration = json.create_object();
+    json.add_string_to_object(unregistration, "id", id);
+    json.add_string_to_object(unregistration, "method", "workspace/didChangeWatchedFiles");
+    json.add_item_to_array(unregisterations, unregistration);
 
     lsp_send_request(g_next_request_id++, "client/unregisterCapability", params);
 }
@@ -196,48 +196,48 @@ void unregister_watcher(const(char)* id) {
 /// Fills 'watcher' with the pattern for 'pattern' under 'base': a
 /// RelativePattern when the client takes one (the only form that can anchor a
 /// watcher outside the workspace), an absolute glob otherwise.
-void add_watcher(c.cJSON* watcher, const(char)[] base, const(char)[] pattern) {
+void add_watcher(JsonNode* watcher, const(char)[] base, const(char)[] pattern) {
     if (g_client_supports_relative_patterns)
     {
-        auto globPattern = c.cJSON_AddObjectToObject(watcher, "globPattern");
-        c.cJSON_AddStringToObject(globPattern, "baseUri", make_directory_uri(arena.allocator(), base));
-        c.cJSON_AddStringToObject(globPattern, "pattern", make_cstring(arena.allocator(), pattern));
+        auto globPattern = json.add_object_to_object(watcher, "globPattern");
+        json.add_string_to_object(globPattern, "baseUri", make_directory_uri(arena.allocator(), base));
+        json.add_string_to_object(globPattern, "pattern", make_cstring(arena.allocator(), pattern));
     }
     else
     {
-        c.cJSON_AddStringToObject(watcher, "globPattern",
+        json.add_string_to_object(watcher, "globPattern",
             make_absolute_glob(arena.allocator(), base, pattern));
     }
 }
 
-void enable_completion(c.cJSON* capabilities)
+void enable_completion(JsonNode* capabilities)
 {
-    auto completion = c.cJSON_AddObjectToObject(capabilities, "completionProvider");
-    c.cJSON_AddBoolToObject(completion, "resolveProvider", 0);
+    auto completion = json.add_object_to_object(capabilities, "completionProvider");
+    json.add_bool_to_object(completion, "resolveProvider", 0);
 
     const(char)*[6] tc = [ ".","=","/","*","+","-"];
-    auto triggerCharacters = c.cJSON_CreateStringArray(tc.ptr, tc.length);
-    c.cJSON_AddItemToObject(completion, "triggerCharacters", triggerCharacters);
+    auto triggerCharacters = json.create_string_array(tc.ptr, tc.length);
+    json.add_item_to_object(completion, "triggerCharacters", triggerCharacters);
 
-    auto completionItem = c.cJSON_AddObjectToObject(completion, "completionItem");
-    c.cJSON_AddBoolToObject(completionItem, "labelDetailsSupport", 1);
+    auto completionItem = json.add_object_to_object(completion, "completionItem");
+    json.add_bool_to_object(completionItem, "labelDetailsSupport", 1);
 }
 
-void enable_signature_help(c.cJSON* capabilities)
+void enable_signature_help(JsonNode* capabilities)
 {
     // Initialize the signatureHelpProvider object
-    auto signatureHelp = c.cJSON_AddObjectToObject(capabilities, "signatureHelpProvider");
+    auto signatureHelp = json.add_object_to_object(capabilities, "signatureHelpProvider");
 
     const(char)*[3] tc = ["(", "{", ","];
-    auto triggerCharacters = c.cJSON_CreateStringArray(tc.ptr, tc.length);
-    c.cJSON_AddItemToObject(signatureHelp, "triggerCharacters", triggerCharacters);
+    auto triggerCharacters = json.create_string_array(tc.ptr, tc.length);
+    json.add_item_to_object(signatureHelp, "triggerCharacters", triggerCharacters);
 
     const(char)*[1] rtc = [","];
-    auto retriggerCharacters = c.cJSON_CreateStringArray(rtc.ptr, rtc.length);
-    c.cJSON_AddItemToObject(signatureHelp, "retriggerCharacters", retriggerCharacters);
+    auto retriggerCharacters = json.create_string_array(rtc.ptr, rtc.length);
+    json.add_item_to_object(signatureHelp, "retriggerCharacters", retriggerCharacters);
 }
 
-void enable_semantice_tokens(c.cJSON* capabilities) {
+void enable_semantice_tokens(JsonNode* capabilities) {
     const(char*)[27] tok_types = [
         "namespace",       // 0
         "type",            // 1
@@ -287,33 +287,33 @@ void enable_semantice_tokens(c.cJSON* capabilities) {
         "_",
     ];
 
-    auto semanticTokensProvider = c.cJSON_AddObjectToObject(capabilities, "semanticTokensProvider");
-    c.cJSON_AddBoolToObject(semanticTokensProvider, "full", 1);
-    c.cJSON_AddBoolToObject(semanticTokensProvider, "range", 0);
+    auto semanticTokensProvider = json.add_object_to_object(capabilities, "semanticTokensProvider");
+    json.add_bool_to_object(semanticTokensProvider, "full", 1);
+    json.add_bool_to_object(semanticTokensProvider, "range", 0);
 
-    auto legend = c.cJSON_AddObjectToObject(semanticTokensProvider, "legend");
-    auto types = c.cJSON_CreateStringArray(tok_types.ptr, tok_types.length);
-    auto mods = c.cJSON_CreateStringArray(tok_mods.ptr, tok_mods.length);
-    c.cJSON_AddItemToObject(legend, "tokenTypes", types);
-    c.cJSON_AddItemToObject(legend, "tokenModifiers", mods);
+    auto legend = json.add_object_to_object(semanticTokensProvider, "legend");
+    auto types = json.create_string_array(tok_types.ptr, tok_types.length);
+    auto mods = json.create_string_array(tok_mods.ptr, tok_mods.length);
+    json.add_item_to_object(legend, "tokenTypes", types);
+    json.add_item_to_object(legend, "tokenModifiers", mods);
 }
 
-c.cJSON* add_object(c.cJSON* it, const(char)* name)
+JsonNode* add_object(JsonNode* it, const(char)* name)
 {
-    return c.cJSON_AddObjectToObject(it, name);
+    return json.add_object_to_object(it, name);
 }
-c.cJSON* add_number(c.cJSON* it, const(char)* name, int value)
+JsonNode* add_number(JsonNode* it, const(char)* name, int value)
 {
-    c.cJSON_AddNumberToObject(it, name, value);
+    json.add_number_to_object(it, name, value);
     return it;
 }
-c.cJSON* add_string(c.cJSON* it, const(char)* name, const(char)* value)
+JsonNode* add_string(JsonNode* it, const(char)* name, const(char)* value)
 {
-    c.cJSON_AddStringToObject(it, name, value);
+    json.add_string_to_object(it, name, value);
     return it;
 }
-c.cJSON* add_bool(c.cJSON* it, const(char)* name, bool value)
+JsonNode* add_bool(JsonNode* it, const(char)* name, bool value)
 {
-    c.cJSON_AddBoolToObject(it, name, value);
+    json.add_bool_to_object(it, name, value);
     return it;
 }

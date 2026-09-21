@@ -2,7 +2,7 @@ module dls.document_symbols;
 
 import rt.dbg;
 import mem = rt.memz;
-import cjson = cjson;
+import rt.json;
 import rt.str;
 
 import core.stdc.stdio;
@@ -16,20 +16,19 @@ import dls.dcd;
 
 
 
-void lsp_document_symbol(int id, cjson.cJSON* params_json) {
+void lsp_document_symbol(int id, JsonNode* params_json) {
     auto allocator = arena.allocator();
-    auto text_document_json = cjson.cJSON_GetObjectItem(params_json, "textDocument");
-    auto uri_json = cjson.cJSON_GetObjectItem(text_document_json, "uri");
-    char* uri = cjson.cJSON_GetStringValue(uri_json);
+    auto text_document_json = json.get_object_item(params_json, "textDocument");
+    char* uri = json_string_item(text_document_json, "uri");
 
     if (uri == null) {
         LWARN("documentSymbol without a uri");
-        lsp_send_response(id, cjson.cJSON_CreateArray());
+        lsp_send_response(id, json.create_array());
         return;
     }
     auto buffer = get_buffer(uri);
     if (buffer.content == null) {
-        lsp_send_response(id, cjson.cJSON_CreateArray());
+        lsp_send_response(id, json.create_array());
         return;
     }
 
@@ -37,16 +36,16 @@ void lsp_document_symbol(int id, cjson.cJSON* params_json) {
 
     auto symbols = dcd_document_symbols(uri, buffer.content);
 
-    auto root = cjson.cJSON_CreateArray();
+    auto root = json.create_array();
 
-    void add_info(DSymbolInfo* info, cjson.cJSON* array)
+    void add_info(DSymbolInfo* info, JsonNode* array)
     {
         auto jsym = create_jsym(it, info, allocator);
-        cjson.cJSON_AddItemToArray(array, jsym);
+        json.add_item_to_array(array, jsym);
 
         if (info.children.length > 0)
         {
-            auto jchildren = cjson.cJSON_AddArrayToObject(jsym, "children");
+            auto jchildren = json.add_array_to_object(jsym, "children");
 
             foreach(c; info.children)
             {
@@ -65,29 +64,29 @@ void lsp_document_symbol(int id, cjson.cJSON* params_json) {
 
     //    if (sym.children.length > 0)
     //    {
-    //        auto jchildren = cjson.cJSON_AddArrayToObject(jsym, "children");
+    //        auto jchildren = json.add_array_to_object(jsym, "children");
     //        foreach(csym; sym.children)
     //        {
     //            auto jc = create_jsym(it, &csym, allocator);
-    //            cjson.cJSON_AddItemToArray(jchildren, jc);
+    //            json.add_item_to_array(jchildren, jc);
     //        }
     //    }
 
-    //    cjson.cJSON_AddItemToArray(root, jsym);
+    //    json.add_item_to_array(root, jsym);
     //}
 
     lsp_send_response(id, root);
 }
 
 
-cjson.cJSON* create_jsym(string it, DSymbolInfo* sym, mem.Allocator allocator)
+JsonNode* create_jsym(string it, DSymbolInfo* sym, mem.Allocator allocator)
 {
-    auto item = cjson.cJSON_CreateObject();
-    cjson.cJSON_AddStringToObject(item, "name", sym.name.length == 0 ? "<empty>".ptr : mem.dupe_add_sentinel(allocator, sym.name).ptr);
+    auto item = json.create_object();
+    json.add_string_to_object(item, "name", sym.name.length == 0 ? "<empty>".ptr : mem.dupe_add_sentinel(allocator, sym.name).ptr);
 
     int lspKind = kind_to_lsp(sym.kind);
 
-    cjson.cJSON_AddNumberToObject(item, "kind", lspKind);
+    json.add_number_to_object(item, "kind", lspKind);
 
     auto s = bytesToPosition(it, sym.range[0]);
     auto e = bytesToPosition(it, sym.range[1]);
@@ -97,13 +96,13 @@ cjson.cJSON* create_jsym(string it, DSymbolInfo* sym, mem.Allocator allocator)
     }
 
     {
-        auto range = cjson.cJSON_AddObjectToObject(item, "selectionRange");
-        auto start = cjson.cJSON_AddObjectToObject(range, "start");
-        auto end = cjson.cJSON_AddObjectToObject(range, "end");
-        cjson.cJSON_AddNumberToObject(start, "line", s.line);
-        cjson.cJSON_AddNumberToObject(start, "character", s.character);
-        cjson.cJSON_AddNumberToObject(end, "line", e.line);
-        cjson.cJSON_AddNumberToObject(end, "character", e.character);
+        auto range = json.add_object_to_object(item, "selectionRange");
+        auto start = json.add_object_to_object(range, "start");
+        auto end = json.add_object_to_object(range, "end");
+        json.add_number_to_object(start, "line", s.line);
+        json.add_number_to_object(start, "character", s.character);
+        json.add_number_to_object(end, "line", e.line);
+        json.add_number_to_object(end, "character", e.character);
         create_range(item, "selectionRange", s, e);
     }
     return item;

@@ -2,7 +2,7 @@ module dls.complete;
 
 import rt.dbg;
 import mem = rt.memz;
-import cjson = cjson;
+import rt.json;
 import rt.str;
 
 import core.stdc.stdio;
@@ -14,14 +14,14 @@ import dls.main;
 import dls.io;
 import dls.dcd;
 
-cjson.cJSON* empty_completion_result() {
-    auto obj = cjson.cJSON_CreateObject();
-    cjson.cJSON_AddBoolToObject(obj, "isIncomplete", false);
-    cjson.cJSON_AddArrayToObject(obj, "items");
+JsonNode* empty_completion_result() {
+    auto obj = json.create_object();
+    json.add_bool_to_object(obj, "isIncomplete", false);
+    json.add_array_to_object(obj, "items");
     return obj;
 }
 
-void lsp_completion(int id, cjson.cJSON * params_json) {
+void lsp_completion(int id, JsonNode * params_json) {
     auto allocator = arena.allocator();
     auto document = lsp_parse_document(params_json);
 
@@ -51,10 +51,10 @@ void lsp_completion(int id, cjson.cJSON * params_json) {
 
     mixin BENCH!("BUILD RESPONSE");
 
-    auto obj = cjson.cJSON_CreateObject();
+    auto obj = json.create_object();
 
-    cjson.cJSON_AddBoolToObject(obj, "isIncomplete", false);
-    auto results = cjson.cJSON_AddArrayToObject(obj, "items");
+    json.add_bool_to_object(obj, "isIncomplete", false);
+    auto results = json.add_array_to_object(obj, "items");
     for (int i = 0; i < dcdResponse.completions.length; i++) {
         auto completion = &dcdResponse.completions[i];
         //LWARN("  identifier   :{}", completion.identifier);
@@ -192,18 +192,18 @@ void lsp_completion(int id, cjson.cJSON * params_json) {
         	}
         }
 
-        auto item = cjson.cJSON_CreateObject();
+        auto item = json.create_object();
 
-        cjson.cJSON_AddStringToObject(item, "label", mem.dupe_add_sentinel(allocator, completion.identifier).ptr);
-        cjson.cJSON_AddNumberToObject(item, "kind", lspKind);
-        cjson.cJSON_AddStringToObject(item, "sortText", mem.dupe_add_sentinel(allocator, sortText).ptr);
-        cjson.cJSON_AddStringToObject(item, "filterText", mem.dupe_add_sentinel(allocator, completion.identifier).ptr);
-        auto labelDetails = cjson.cJSON_AddObjectToObject(item, "labelDetails");
+        json.add_string_to_object(item, "label", mem.dupe_add_sentinel(allocator, completion.identifier).ptr);
+        json.add_number_to_object(item, "kind", lspKind);
+        json.add_string_to_object(item, "sortText", mem.dupe_add_sentinel(allocator, sortText).ptr);
+        json.add_string_to_object(item, "filterText", mem.dupe_add_sentinel(allocator, completion.identifier).ptr);
+        auto labelDetails = json.add_object_to_object(item, "labelDetails");
 
-        cjson.cJSON_AddStringToObject(labelDetails, "detail", detail.length == 0 ? "" :  mem.dupe_add_sentinel(allocator, detail).ptr);
-        cjson.cJSON_AddStringToObject(labelDetails, "description", rtype.length == 0 ? "" : mem.dupe_add_sentinel(allocator, rtype).ptr);
+        json.add_string_to_object(labelDetails, "detail", detail.length == 0 ? "" :  mem.dupe_add_sentinel(allocator, detail).ptr);
+        json.add_string_to_object(labelDetails, "description", rtype.length == 0 ? "" : mem.dupe_add_sentinel(allocator, rtype).ptr);
 
-        cjson.cJSON_AddItemToArray(results, item);
+        json.add_item_to_array(results, item);
 
     }
     lsp_send_response(id, obj);
