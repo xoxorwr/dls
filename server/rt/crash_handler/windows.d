@@ -8,7 +8,7 @@ import core.stdc.stdio: fprintf, stderr;
 import core.stdc.string: memcpy, strncmp, strlen;
 
 
-extern(C) export void rt_register_crash_handler(const(char)* filename)
+extern(C) export void rt_register_crash_handler()
 {
     SetUnhandledExceptionFilter(&TopLevelExceptionHandler); 
 }
