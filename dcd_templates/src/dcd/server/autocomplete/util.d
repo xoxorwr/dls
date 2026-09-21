@@ -128,20 +128,21 @@ auto getTokensBeforeCursor(const(ubyte[]) sourceCode, size_t cursorPosition,
     // The replacement goes into a private copy: the caller's buffer is an open
     // document (served under a `const` slice), and a completion must not leave
     // a stray ';' in it for every later request to parse.
-    ubyte[] modified;
-    if (cursorPosition < sourceCode.length
-        && (
-            sourceCode[cursorPosition] == '\n'
-            || sourceCode[cursorPosition] == '\r'
-            || sourceCode[cursorPosition] == '\t'
-            || sourceCode[cursorPosition] == ' '
-        )
-    )
-    {
-        modified = sourceCode.dup;
-        modified[cursorPosition] = cast(ubyte) ';';
-    }
-    auto source = modified.length ? modified : cast(ubyte[]) sourceCode;
+    // ubyte[] modified;
+    // if (cursorPosition < sourceCode.length
+    //     && (
+    //         sourceCode[cursorPosition] == '\n'
+    //         || sourceCode[cursorPosition] == '\r'
+    //         || sourceCode[cursorPosition] == '\t'
+    //         || sourceCode[cursorPosition] == ' '
+    //     )
+    // )
+    // {
+    //     modified = sourceCode.dup;
+    //     modified[cursorPosition] = cast(ubyte) ';';
+    // }
+    // auto source = modified.length ? modified : cast(ubyte[]) sourceCode;
+    auto source = cast(ubyte[]) sourceCode;
 
     //size_t a = cursorPosition;
     //while(a > 0)
