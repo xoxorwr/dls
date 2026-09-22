@@ -46,6 +46,8 @@ far the most expensive part of a run.
 | `test_acyclic_dependencies.py` | multi-level non-circular import chains |
 | `test_edit_public_imported_module.py` | editing a module other modules import |
 | `test_enum_completion.py` | `.MEMBER` enum shorthand completion |
+| `test_manifest_constants.py` | the type of an `enum name = <initializer>;` constant |
+| `test_struct_initializer.py` | field completion in `{ ... }` struct literals |
 | `test_anonymous_struct.py` | named variables of anonymous struct type |
 | `test_auto_declarations.py` | `auto` initializers and chained `auto` (the breadcrumb path) |
 | `test_template_instantiation.py` | members of an instantiated struct template show the argument's type |

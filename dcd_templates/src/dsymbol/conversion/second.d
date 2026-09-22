@@ -771,12 +771,14 @@ do
 /**
  * Resolves an initializer expression from its AST node.
  *
- * A name chain, prefix `&` / `*`, index expressions, a call (worth what the
- * callee returns), literals (as their built-in type name), a ternary (its
- * first non-`null` branch), `cast`/`new` (their type), and array
- * initializers/literals (element then array).  Returns false, leaving the
- * symbol's type unset, for a shape it does not model (a struct initializer, a
- * binary expression, a function literal, an unmodelled primary).
+ * A name chain, prefix `&` / `*` / `!` / `-` / `+` / `~`, index expressions, a
+ * call (worth what the callee returns), literals (as their built-in type
+ * name), a ternary (its first non-`null` branch), `cast`/`new` (their type),
+ * array initializers/literals (element then array) and the builtin operators
+ * (see `evalBinary`; `1 << 0` is an `int`, `a == b` a `bool`).  Returns
+ * false, leaving the symbol's type unset, for a shape it does not model (a
+ * struct initializer, an operator over a user type, a function literal, an
+ * unmodelled primary).
  */
 private void resolveInitializerNode(const(BaseNode) expression, DSymbol* symbol,
 	TypeLookup* lookup, Scope* moduleScope, ref ModuleCache cache, DSymbol*[string] mapping,
@@ -801,6 +803,15 @@ private void resolveInitializerNode(const(BaseNode) expression, DSymbol* symbol,
 			value = instantiateFromNode(value, ioti.templateInstance, ioti.tokens, symbol,
 				moduleScope, cache, mapping);
 		return true;
+	}
+
+	// The symbol of a builtin type name (`int`, `bool`, `string`), looked up
+	// exactly the way a literal's type name is.
+	DSymbol* builtinType(string name)
+	{
+		return name is null
+			? null
+			: lookupInitializerBase(internString(name), symbol, moduleScope, mapping);
 	}
 
 	bool evalNode(const(BaseNode) e, out DSymbol* value)
@@ -882,6 +893,120 @@ private void resolveInitializerNode(const(BaseNode) expression, DSymbol* symbol,
 			value = resolveTypeNodeValue(ne.type, symbol, moduleScope, cache, mapping, ok);
 			return ok;
 		}
+		// A comparison is wrapped: `CmpExpression` is what holds the one
+		// (`<` -> `relExpression`, `==` -> `equalExpression`, ...), or the
+		// plain expression when there is no comparison operator at all.
+		if (auto cmp = cast(const(CmpExpression)) e)
+		{
+			if (cmp.shiftExpression !is null)
+				return evalNode(cmp.shiftExpression, value);
+			if (cmp.equalExpression !is null)
+				return evalNode(cmp.equalExpression, value);
+			if (cmp.identityExpression !is null)
+				return evalNode(cmp.identityExpression, value);
+			if (cmp.relExpression !is null)
+				return evalNode(cmp.relExpression, value);
+			if (cmp.inExpression !is null)
+				return evalNode(cmp.inExpression, value);
+			return false;
+		}
+
+		// The result of one binary operator over two operands.  `typeSwap(...,
+		// false)` keeps an alias name, so a `string` operand stays a `string`
+		// instead of becoming the array type.
+		bool evalBinaryResult(BinaryKind kind, const(ExpressionNode) leftNode,
+			const(ExpressionNode) rightNode, out DSymbol* result)
+		{
+			result = null;
+			with (BinaryKind) final switch (kind)
+			{
+			case comparison:
+			case logical:
+				// `a == b` / `a && b`: a `bool`, whatever the operands are.
+				result = builtinType("bool");
+				return result !is null;
+			case shift:
+				// The promoted left operand: `byte << 1` is an `int`.
+				DSymbol* operand;
+				if (!evalNode(leftNode, operand))
+					return false;
+				typeSwap(operand, false);
+				result = builtinType(promotedScalarName(operandTypeName(operand)));
+				return result !is null;
+			case concatenation:
+				// `a ~ b` of two equal string types is that string type;
+				// `string ~ char` and arrays are not modelled.
+				DSymbol* leftString;
+				DSymbol* rightString;
+				if (!evalNode(leftNode, leftString) || !evalNode(rightNode, rightString))
+					return false;
+				typeSwap(leftString, false);
+				typeSwap(rightString, false);
+				auto name = operandTypeName(leftString);
+				if (!isStringTypeName(name) || name != operandTypeName(rightString))
+					return false;
+				result = builtinType(name);
+				return result !is null;
+			case arithmetic:
+				DSymbol* leftOperand;
+				DSymbol* rightOperand;
+				if (!evalNode(leftNode, leftOperand) || !evalNode(rightNode, rightOperand))
+					return false;
+				typeSwap(leftOperand, false);
+				typeSwap(rightOperand, false);
+				result = builtinType(commonScalarName(operandTypeName(leftOperand),
+					operandTypeName(rightOperand)));
+				return result !is null;
+			}
+		}
+
+		// `a <op> b`: dparse has one class per operator (see the casts below),
+		// and the class says what the result is.  Anything else -- an
+		// overloaded `opBinary`, an enum member's base type -- stays
+		// unmodelled and leaves the symbol untyped.
+		bool evalBinary(const(BaseNode) node, out DSymbol* result)
+		{
+			result = null;
+			if (auto binary = cast(const(AddExpression)) node)
+				return evalBinaryResult(
+					binary.operator == tok!"~" ? BinaryKind.concatenation
+						: BinaryKind.arithmetic,
+					binary.left, binary.right, result);
+			if (auto binary = cast(const(MulExpression)) node)
+				return evalBinaryResult(BinaryKind.arithmetic, binary.left, binary.right,
+					result);
+			if (auto binary = cast(const(ShiftExpression)) node)
+				return evalBinaryResult(BinaryKind.shift, binary.left, binary.right, result);
+			if (auto binary = cast(const(AndExpression)) node)
+				return evalBinaryResult(BinaryKind.arithmetic, binary.left, binary.right,
+					result);
+			if (auto binary = cast(const(OrExpression)) node)
+				return evalBinaryResult(BinaryKind.arithmetic, binary.left, binary.right,
+					result);
+			if (auto binary = cast(const(XorExpression)) node)
+				return evalBinaryResult(BinaryKind.arithmetic, binary.left, binary.right,
+					result);
+			if (auto binary = cast(const(PowExpression)) node)
+				return evalBinaryResult(BinaryKind.arithmetic, binary.left, binary.right,
+					result);
+			if (auto binary = cast(const(EqualExpression)) node)
+				return evalBinaryResult(BinaryKind.comparison, binary.left, binary.right,
+					result);
+			if (auto binary = cast(const(RelExpression)) node)
+				return evalBinaryResult(BinaryKind.comparison, binary.left, binary.right,
+					result);
+			if (auto binary = cast(const(IdentityExpression)) node)
+				return evalBinaryResult(BinaryKind.comparison, binary.left, binary.right,
+					result);
+			if (auto binary = cast(const(AndAndExpression)) node)
+				return evalBinaryResult(BinaryKind.logical, binary.left, binary.right, result);
+			if (auto binary = cast(const(OrOrExpression)) node)
+				return evalBinaryResult(BinaryKind.logical, binary.left, binary.right, result);
+			return false;
+		}
+
+		if (evalBinary(e, value))
+			return true;
 
 		if (auto unary = cast(const(UnaryExpression)) e)
 		{
@@ -914,8 +1039,9 @@ private void resolveInitializerNode(const(BaseNode) expression, DSymbol* symbol,
 						return false;
 					return true;
 				}
-				return evalInitializerPrimary(unary.primaryExpression, symbol, moduleScope,
-					mapping, value);
+				// A parenthesised expression (`(1 << 0)`) or an array literal
+				// needs the primary node's own walk, not just its literal.
+				return evalNode(unary.primaryExpression, value);
 			}
 			// `foo(...)`: worth what the callee returns.
 			if (unary.functionCallExpression !is null)
@@ -945,6 +1071,24 @@ private void resolveInitializerNode(const(BaseNode) expression, DSymbol* symbol,
 			// `new T(...)`: a value of `T`.
 			if (unary.newExpression !is null)
 				return evalNode(unary.newExpression, value);
+			// prefix `!` (a `bool`) and `-` / `+` / `~` (the promoted
+			// operand type, through the builtin scalars only).
+			if (unary.unaryExpression !is null
+				&& (unary.prefix.type == tok!"!" || unary.prefix.type == tok!"-"
+					|| unary.prefix.type == tok!"+" || unary.prefix.type == tok!"~"))
+			{
+				DSymbol* operand;
+				if (!evalNode(unary.unaryExpression, operand))
+					return false;
+				if (unary.prefix.type == tok!"!")
+					value = builtinType("bool");
+				else
+				{
+					typeSwap(operand, false);
+					value = builtinType(promotedScalarName(operandTypeName(operand)));
+				}
+				return value !is null;
+			}
 			// prefix `&` / `*`.
 			if (unary.unaryExpression !is null)
 			{
@@ -1005,6 +1149,10 @@ private void resolveInitializerNode(const(BaseNode) expression, DSymbol* symbol,
 				value = arrayLiteralSymbol(element);
 				return true;
 			}
+			// `(expr)`: the parser records the parenthesised expression (as
+			// the one-item list the `Expression` node holds) in the primary.
+			if (primary.expression !is null)
+				return evalNode(primary.expression, value);
 			return evalInitializerPrimary(primary, symbol, moduleScope, mapping, value);
 		}
 
@@ -1181,6 +1329,116 @@ private bool isNullLiteral(const(ExpressionNode) n)
 	if (auto pe = cast(const(PrimaryExpression)) n)
 		return pe.primary.type == tok!"null";
 	return false;
+}
+
+/// What a binary expression's type is made of -- see `evalBinary` in
+/// `resolveInitializerNode`.
+private enum BinaryKind : ubyte
+{
+	/// `==`, `!=`, `<`, `<=`, `>`, `>=`, `is`, `!is`: a `bool`.
+	comparison,
+	/// `&&`, `||`: a `bool`.
+	logical,
+	/// `<<`, `>>`, `>>>`: the promoted left operand.
+	shift,
+	/// `+`, `-`, `*`, `/`, `%`, `&`, `|`, `^`, `^^`: the common type.
+	arithmetic,
+	/// `~`: the string type of the two operands.
+	concatenation,
+}
+
+/// A builtin scalar type: the name D writes it with, where the usual arithmetic
+/// conversions rank it, and whether it is unsigned.
+private struct ScalarType
+{
+	string name;
+	int rank;
+	bool isUnsigned;
+}
+
+/**
+ * The builtin scalar types, in promotion order: everything ranking below
+ * `int` promotes to `int`, and the floats sit above the integrals.
+ */
+private immutable ScalarType[] scalarTypes = [
+	ScalarType("bool", 0, true),
+	ScalarType("byte", 1, false),
+	ScalarType("ubyte", 1, true),
+	ScalarType("short", 2, false),
+	ScalarType("ushort", 2, true),
+	ScalarType("char", 2, true),
+	ScalarType("wchar", 2, true),
+	ScalarType("dchar", 2, true),
+	ScalarType("int", 3, false),
+	ScalarType("uint", 3, true),
+	ScalarType("long", 4, false),
+	ScalarType("ulong", 4, true),
+	ScalarType("float", 5, false),
+	ScalarType("double", 6, false),
+	ScalarType("real", 7, false),
+];
+
+/// Looks a builtin scalar type up by name; false when `name` is not one.
+private bool scalarTypeNamed(string name, out ScalarType type)
+{
+	foreach (candidate; scalarTypes)
+		if (candidate.name == name)
+		{
+			type = candidate;
+			return true;
+		}
+	return false;
+}
+
+/**
+ * D's integral promotion of a builtin type name, or null when the name is not
+ * a builtin scalar (`string`, a struct, an enum).
+ */
+private string promotedScalarName(string name)
+{
+	ScalarType type;
+	if (!scalarTypeNamed(name, type))
+		return null;
+	// Everything narrower than `int` -- including `bool` and the character
+	// types -- promotes to `int` before an operator sees it.
+	return type.rank < 3 ? "int" : name;
+}
+
+/**
+ * The common type of two builtin scalars, i.e. D's usual arithmetic
+ * conversions: `1 + 2L` is a `long`, `1 + 1.0` a `double`, `1u + 1` a `uint`
+ * and `true + true` an `int`.  Null when either name is not a builtin scalar.
+ */
+private string commonScalarName(string left, string right)
+{
+	auto promotedLeft = promotedScalarName(left);
+	auto promotedRight = promotedScalarName(right);
+	if (promotedLeft is null || promotedRight is null)
+		return null;
+	if (promotedLeft == promotedRight)
+		return promotedLeft;
+	ScalarType leftType;
+	ScalarType rightType;
+	scalarTypeNamed(promotedLeft, leftType);
+	scalarTypeNamed(promotedRight, rightType);
+	if (leftType.rank != rightType.rank)
+		return leftType.rank > rightType.rank ? promotedLeft : promotedRight;
+	// The same rank with a different sign: the unsigned one is the common type
+	// (`1u + 1` is a `uint`).
+	return leftType.isUnsigned ? promotedLeft : promotedRight;
+}
+
+/// Whether a type name is one of D's three string aliases.
+private bool isStringTypeName(string name)
+{
+	return name == "string" || name == "wstring" || name == "dstring";
+}
+
+/// The type name an operand was written with (an alias stays an alias), or
+/// null when the operand has no type.
+private string operandTypeName(const(DSymbol)* operand)
+{
+	return operand is null ? null : operand.name.data;
 }
 
 void resolveTypeFromInitializer(DSymbol* symbol, TypeLookup* lookup,

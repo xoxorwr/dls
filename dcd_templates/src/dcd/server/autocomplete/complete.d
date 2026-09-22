@@ -197,6 +197,46 @@ size_t findEnclosingBrace(T)(T tokens, size_t i) {
     return size_t.max;
 }
 
+/**
+ * Whether the tokens end at a position inside a struct initializer where an
+ * element -- or the field name of one (`name:`) -- is expected:
+ * `Foo foo = { <here>`, `Foo foo = { 1, <here>` and the nested
+ * `Outer o = { inner: { 1, <here>` all are.
+ *
+ * This is the cheaper half of `getStructInitializerTokenChain` (which also has
+ * to resolve the expression in front of the `=`), and it is what the calltip
+ * hint needs: it has to work on a plain token array as well, while that chain
+ * is built from the lazily sorted token range a completion request carries.
+ */
+bool isStructInitializerElement(T)(T tokens) {
+    if (tokens.length == 0)
+        return false;
+
+    // Only a position where the next thing is a field name.
+    if (tokens[$ - 1].type != tok!"{" && tokens[$ - 1].type != tok!",")
+        return false;
+
+    size_t i = tokens.length - 1;
+    while (i != size_t.max) {
+        // The tokens between the cursor and its closing brace, so that a
+        // comma inside a nested call (`f(1, <here>)`) does not count.
+        size_t braceIndex = findEnclosingBrace(tokens, i);
+        if (braceIndex == size_t.max || braceIndex == 0)
+            return false;
+        size_t prev = braceIndex - 1;
+        if (tokens[prev].type == tok!"=")
+            return true;
+        // `inner: { 1, <here>`: the brace belongs to a designated element, so
+        // the initializer it is in is the one around that element.
+        if (tokens[prev].type == tok!":" && prev > 0 && tokens[prev - 1].type == tok!"identifier") {
+            i = prev - 1;
+            continue;
+        }
+        return false;
+    }
+    return false;
+}
+
 auto getStructInitializerTokenChain(T)(T tokens) {
     if (tokens.length == 0)
         return (const(Token)[]).init;
@@ -927,6 +967,14 @@ CalltipHint getCalltipHint(T)(T beforeTokens, out size_t parenIndex)
 	{
 		size_t tmp = beforeTokens.goBackToOpenParen;
 		if(tmp == size_t.max){
+			// The comma is not inside a call's argument list but directly in
+			// a struct initializer (`Foo foo = { 1, <here>`), where it is the
+			// separator between two elements and the cursor is waiting for
+			// the next field name.  Leave the hint at `none` so `complete`
+			// hands the request to `dotCompletion`, whose struct-members path
+			// knows what to do with it.
+			if (isStructInitializerElement(beforeTokens))
+				return CalltipHint.none;
 			return CalltipHint.regularArguments;
 		}
 		parenIndex = tmp;
