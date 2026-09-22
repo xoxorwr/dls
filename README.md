@@ -27,6 +27,10 @@ make MODE=RELEASE    # optimized
 The default compiler is `ldmd2` (LDC's dmd-compatible driver);
 override it with `make DC=<driver>`.
 
+
+You can find pre-built binaries from the [nightly release](https://github.com/xoxorwr/dls/releases/tag/nightly).
+
+
 # Tests
 
 
@@ -52,6 +56,7 @@ Create a `dls.json` at the root of your project:
 
 Without it the server still works, with only the compiler's default
 import paths registered.
+
 
 - VSCode: `make build-vscode`.  Point `dls.serverPath` at the binary, or let
   the extension download one; the `dls.createConfig` command writes a starter
