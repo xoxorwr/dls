@@ -1616,11 +1616,11 @@ private:
 	DocString makeDocumentation(string documentation)
 	{
 		if (documentation.isDitto)
-			return DocString(lastComment, true);
+			return DocString(lastComment);
 		else
 		{
 			lastComment = internString(documentation);
-			return DocString(lastComment, false);
+			return DocString(lastComment);
 		}
 	}
 

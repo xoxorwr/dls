@@ -87,7 +87,7 @@ package istring[24] builtinTypeNames;
  * $(LREF SUPER_SYMBOL_NAME) child as CompletionKind.variableName.
  *
  * `alias x this;` generates an IMPORT_SYMBOL_NAME DSymbol with
- * CompletionKind.importSymbol, as well as adding itself to `aliasThisSymbols`
+ * CompletionKind.importSymbol as child.
  *
  * `mixin Foo;` for Foo mixin templates generates an IMPORT_SYMBOL_NAME DSymbol
  * with CompletionKind.importSymbol as child.

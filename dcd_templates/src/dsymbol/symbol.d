@@ -431,8 +431,6 @@ struct DSymbol
 	// TODO: assert that the type is not a function
 	DSymbol* type;
 
-	// Is alias this symbols
-	DSymbol*[] aliasThisSymbols;
 	/**
 	 * Names of function arguments
 	 */
@@ -479,13 +477,6 @@ struct DSymbol
 	 */
 	istring[] templateArgNames;
 
-	/**
-	 * True while `instantiateSymbol` rebuilds this instance.  A template that
-	 * mentions itself (`Node!T next;`) would otherwise rebuild forever: the
-	 * member's type is the instance being rebuilt.
-	 */
-	bool instantiating;
-
 	size_t location;
 	size_t location_end;
 
@@ -519,7 +510,17 @@ struct DSymbol
         bool parameterIsOut: 1;
         bool parameterIsIn: 1;
 
-        bool deleted: 1;
+	/**
+	 * True while `instantiateSymbol` rebuilds this instance.  A template that
+	 * mentions itself (`Node!T next;`) would otherwise rebuild forever: the
+	 * member's type is the instance being rebuilt.
+	 *
+	 * A bit, not a field: as a `bool` member it sits between 16-byte-aligned
+	 * fields and pads out to a whole 8-byte slot for 1 bit of information.
+	 */
+	bool instantiating: 1;
+
+	bool deleted: 1;
     }
     Flags flags;
     //alias ownType = flags.ownType;
@@ -587,29 +588,22 @@ struct DSymbol
 }
 
 /**
- * istring with actual content and information if it was ditto
+ * A documentation comment. Just the resolved text: whether it was written as
+ * "ditto" is settled while parsing (see `makeDocumentation`) and read
+ * nowhere, so no flag is kept.
  */
 struct DocString
 {
-	/// Creates a non-ditto comment.
+	/// Creates a comment (already ditto-resolved by the caller).
 	this(istring content)
 	{
 		this.content = content;
-	}
-
-	/// Creates a comment which may have been ditto, but has been resolved.
-	this(istring content, bool ditto)
-	{
-		this.content = content;
-		this.ditto = ditto;
 	}
 
 	alias content this;
 
 	/// Contains the documentation string associated with this symbol, resolves ditto to the previous comment with correct scope.
 	istring content;
-	/// `true` if the documentation was just a "ditto" comment copying from the previous comment.
-	bool ditto;
 }
 
 struct UpdatePair
