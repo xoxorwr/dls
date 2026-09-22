@@ -219,6 +219,16 @@ do
 				acSymbol.kind = CompletionKind.aliasName;
 				acSymbol.symbolFile = acSymbol.altFile;
 			}
+
+			// The bind's data has been used: the symbol points at the
+			// declaration it binds now.  Keeping the lookup makes later
+			// passes read this alias as something with a type expression of
+			// its own (`resolveType` is handed every alias whose operand is
+			// still unresolved), and a selective import has none - it used to
+			// end in `resolveType`'s "How did this happen?" assertion, taking
+			// the server down for any module that renamed a still-unresolved
+			// symbol (`import std.traits : CoreUnconst = Unconst;`).
+			typeLookups.clear();
 		}
 	}
 	else
@@ -1672,7 +1682,16 @@ void resolveType(DSymbol* symbol, ref TypeLookups typeLookups,
 		else if (lookup.kind == TypeLookupKind.inherit)
 			resolveInheritance(symbol, typeLookups, moduleScope, cache, mapping);
 		else
-			assert(false, "How did this happen?");
+		{
+			// A lookup kind with nothing to do here (a selective import is
+			// resolved by `resolveImport`, an `alias this` by
+			// `resolveAliasThis`).  It used to be an assertion, which turned
+			// any such symbol into a dead language server - the log line is
+			// the useful half of that.
+			warning("unhandled lookup kind ", lookup.kind, " on symbol ",
+				symbol.name, " (kind ", symbol.kind, ", ", symbol.symbolFile, ")");
+			continue;
+		}
 		}
 }
 

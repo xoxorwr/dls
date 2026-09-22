@@ -237,6 +237,21 @@ rest of the action axis.
 
 ## Regressions that were fixed (keep these tests)
 
+* `test_imports.RenamedSelectiveImportTests` — `import lib : name = other;`
+  used to kill the server (exit code 255, stack trace, and every request
+  afterwards failed with it) whenever `other` was not resolved yet.  The
+  caching pass resolves such a bind in `resolveImport`, which sets the symbol's
+  type, renames its kind to `aliasName` - and left the import's bind data on
+  it.  The alias retry that runs afterwards covers every alias whose operand is
+  still unresolved, found that symbol, and handed its `selectiveImport` lookup
+  to `resolveType`, whose "How did this happen?" `assert(false)` was the crash.
+  That shape is not exotic: `import core.internal.traits : CoreUnconst =
+  Unconst;` in `std/traits.d` is one, which is how a plain
+  `import std.stdio;` - or opening `std/algorithm/iteration.d` - took the
+  server down.  `resolveImport` now drops the bind data it has consumed, and
+  `resolveType` logs an unhandled lookup kind instead of asserting, since a
+  dead language server is worse than an unresolved type.
+
 * `test_public_import_forwarding` — with a two-level `public import` chain
   (`app -> m1 -> m2 -> leaf`), opening the documents as `app, m1, m2, leaf`
   used to make the app lose *all* completions for symbols reached through the

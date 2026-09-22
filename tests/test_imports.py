@@ -102,3 +102,71 @@ class SystemImportPathsWithoutConfigTests(DlsTestCase):
             f"no registered import path holds object.d: {registered}\n"
             + self.client.stderr_tail(),
         )
+
+
+RENAMED_IMPORT_APP = """module app;
+
+import lib : Renamed = Target;
+
+void main()
+{
+    Rene
+}
+"""
+
+UNRESOLVED_ALIAS_LIB = """module lib;
+
+alias Target = Missing;
+"""
+
+RENAMED_IMPORT_OF_A_TYPE = """module app2;
+
+import lib2 : Renamed = Widget;
+
+void main()
+{
+    Ren
+}
+"""
+
+WIDGET_LIB = """module lib2;
+
+struct Widget
+{
+    int size;
+}
+"""
+
+
+class RenamedSelectiveImportTests(DlsTestCase):
+    """`import lib : name = other;` binds `name` to `other`.
+
+    The resolving pass used to leave the import's bind data on the symbol, so
+    the alias retry -- which runs for every alias whose operand is still
+    unresolved, and a rename of an unresolved symbol is one -- handed a
+    `selectiveImport` lookup to `resolveType`, whose "How did this happen?"
+    assertion took the whole server down.  That is not an exotic shape:
+    `import core.internal.traits : CoreUnconst = Unconst;` in std.traits is
+    one, which is how a plain `import std.stdio;` used to kill the server.
+    """
+
+    PROJECT = {
+        "app.d": RENAMED_IMPORT_APP,
+        "lib.d": UNRESOLVED_ALIAS_LIB,
+        "app2.d": RENAMED_IMPORT_OF_A_TYPE,
+        "lib2.d": WIDGET_LIB,
+    }
+
+    def test_the_server_survives_a_rename_of_an_unresolved_symbol(self):
+        doc = self.open_doc("app.d")
+        # The crash happened while the opened module was cached, so every
+        # request after the open failed; answering at all is the regression.
+        self.assertEqual(
+            ["Renamed", "main"], [symbol["name"] for symbol in doc.document_symbols()]
+        )
+        # And the next request finds a server that is still there.
+        self.assertIsInstance(doc.completion("    Rene")["items"], list)
+
+    def test_the_renamed_name_completes_where_it_resolves(self):
+        doc = self.open_doc("app2.d")
+        self.assertIn("Renamed", labels(doc.completion("    Ren")["items"]))
