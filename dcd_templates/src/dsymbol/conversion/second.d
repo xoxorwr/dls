@@ -128,6 +128,27 @@ void secondPass(SemanticSymbol* rootModule, SemanticSymbol* currentSymbol, Scope
 		if (child.acSymbol.kind == CompletionKind.functionName)
 			secondPass(rootModule, child, moduleScope, cache);
 
+	// `alias T = typeof(x)` / `alias M = __traits(getMember, T, n)` resolve in
+	// the first loop above, before the variables they name (second loop), so a
+	// first attempt can forward to an as-yet-unresolved operand.  Retry the
+	// suspicious ones now that every sibling resolved: idempotent for healthy
+	// aliases, and a bounded fixpoint so `alias M` after `alias T` settles too.
+	foreach (i; 0 .. 4)
+	{
+		bool progressed = false;
+		foreach (child; currentSymbol.children)
+		{
+			if (child.acSymbol.kind != CompletionKind.aliasName
+				|| !aliasNeedsRetry(child.acSymbol))
+				continue;
+			resolveType(child.acSymbol, child.typeLookups, moduleScope, cache);
+			if (!aliasNeedsRetry(child.acSymbol))
+				progressed = true;
+		}
+		if (!progressed)
+			break;
+	}
+
 
 	// Alias this and mixin templates are resolved after child nodes are
 	// resolved so that the correct symbol information will be available.
@@ -341,6 +362,198 @@ private bool resolveTypeFromTypeNode(const(Type) type, DSymbol* symbol, TypeLook
 	return true;
 }
 
+/// `typeof(expr)`: the type of what the expression stands for, evaluated with
+/// the same walker an initializer uses (`typeof(foo)` for `foo` of type
+/// `Foo!int` is the instance).  Anything the initializer walker does not
+/// model leaves the outcome unmodelled, exactly as before.
+private TypeNodeOutcome resolveTypeofExpression(const(TypeofExpression) te, DSymbol* symbol,
+	TypeLookup* lookup, Scope* moduleScope, ref ModuleCache cache, DSymbol*[string] mapping,
+	out DSymbol* current, out istring missingName)
+{
+	current = null;
+	missingName = istring.init;
+	if (te is null || te.expression is null)
+		return TypeNodeOutcome.unmodelled;
+	DSymbol* value;
+	bool handled;
+	resolveInitializerNode(te.expression, symbol, lookup, moduleScope, cache, mapping,
+		handled, value);
+	if (!handled || value is null)
+		return TypeNodeOutcome.unmodelled;
+	typeSwap(value);
+	if (value is null)
+		return TypeNodeOutcome.unresolved;
+	// Forwarding to an operand that has not resolved yet (`alias T =
+	// typeof(x)` running before `x`) would freeze the alias at the operand
+	// itself.  Leave the type unset instead: the alias retry pass in
+	// `secondPass` re-runs once the siblings resolved.
+	if ((value.kind == CompletionKind.variableName
+			|| value.kind == CompletionKind.memberVariableName
+			|| value.kind == CompletionKind.functionName
+			|| value.kind == CompletionKind.enumMember
+			|| value.kind == CompletionKind.aliasName)
+		&& value.type is null)
+		return TypeNodeOutcome.unresolved;
+	current = value;
+	return TypeNodeOutcome.resolved;
+}
+
+/// `__traits(getMember, Base, name)`: the member of `Base` called `name`.
+/// Only this trait is modelled, and `name` must fold to a string: either a
+/// literal or a manifest constant (`enum name = "bar"`) recorded by the first
+/// pass.  Anything else stays unmodelled.
+private TypeNodeOutcome resolveTraitsExpression(const(TraitsExpression) tr, DSymbol* symbol,
+	TypeLookup* lookup, Scope* moduleScope, ref ModuleCache cache, DSymbol*[string] mapping,
+	out DSymbol* current, out istring missingName)
+{
+	current = null;
+	missingName = istring.init;
+	if (tr is null || tr.identifier.text != "getMember"
+		|| tr.templateArgumentList is null
+		|| tr.templateArgumentList.items.length != 2)
+		return TypeNodeOutcome.unmodelled;
+
+	DSymbol* base;
+	auto arg0 = cast() tr.templateArgumentList.items[0];
+	if (arg0 is null)
+		return TypeNodeOutcome.unmodelled;
+	if (arg0.type !is null)
+	{
+		bool ok;
+		base = resolveTypeNodeValue(arg0.type, symbol, moduleScope, cache, mapping, ok, true);
+		if (!ok)
+			return TypeNodeOutcome.unmodelled;
+	}
+	else if (arg0.assignExpression !is null)
+	{
+		bool handled;
+		resolveInitializerNode(arg0.assignExpression, symbol, lookup, moduleScope, cache,
+			mapping, handled, base);
+		if (!handled)
+			return TypeNodeOutcome.unmodelled;
+		typeSwap(base);
+	}
+	else
+		return TypeNodeOutcome.unmodelled;
+	if (base is null)
+		return TypeNodeOutcome.unresolved;
+
+	istring memberName;
+	if (!foldTraitMemberName(cast() tr.templateArgumentList.items[1], symbol, moduleScope,
+			memberName) || memberName.length == 0)
+		return TypeNodeOutcome.unmodelled;
+
+	current = memberStep(base, memberName, moduleScope);
+	if (current is null)
+		return TypeNodeOutcome.unresolved;
+	return TypeNodeOutcome.resolved;
+}
+
+/// Folds the member-name argument of `__traits(getMember, ...)`: a plain
+/// `"literal"`, or an identifier bound to a manifest string constant.
+///
+/// A bare identifier parses as a *type* (`name` in `getMember(T, name)`), so
+/// both shapes are handled: an expression (literals) and a single-part type
+/// (identifier constants).
+private bool foldTraitMemberName(const(TemplateArgument) arg, DSymbol* symbol,
+	Scope* moduleScope, out istring memberName)
+{
+	memberName = istring.init;
+	if (arg is null)
+		return false;
+	if (arg.assignExpression !is null)
+	{
+		auto tokens = arg.assignExpression.tokens;
+		if (tokens.length != 1)
+			return false;
+		auto t = tokens[0];
+		if (t.type == tok!"stringLiteral" || t.type == tok!"wstringLiteral"
+			|| t.type == tok!"dstringLiteral")
+			return unquoteTraitLiteral(t.text, memberName);
+		if (t.type == tok!"identifier")
+			return resolveConstantName(internString(t.text), symbol, moduleScope,
+				memberName);
+		return false;
+	}
+	if (arg.type !is null)
+	{
+		auto t2 = arg.type.type2;
+		if (t2 is null || t2.typeIdentifierPart is null
+			|| arg.type.typeSuffixes.length > 0)
+			return false;
+		auto tip = t2.typeIdentifierPart;
+		if (tip.typeIdentifierPart !is null)
+			return false;
+		auto ioti = tip.identifierOrTemplateInstance;
+		if (ioti is null || ioti.templateInstance !is null
+			|| ioti.identifier == tok!"")
+			return false;
+		return resolveConstantName(internString(ioti.identifier.text), symbol,
+			moduleScope, memberName);
+	}
+	return false;
+}
+
+/// Unquotes a plain `"literal"` trait argument; anything else (q{}, prefixed
+/// strings) is left unfolded.
+private bool unquoteTraitLiteral(string text, out istring memberName)
+{
+	memberName = istring.init;
+	if (text.length < 2)
+		return false;
+	immutable char q = text[0];
+	if ((q != '"' && q != '\'' && q != '`') || text[$ - 1] != q)
+		return false;
+	memberName = internString(text[1 .. $ - 1]);
+	return true;
+}
+
+/// Follows an identifier to the manifest string constant it names
+/// (`enum name = "bar"`, recorded by the first pass), through one alias hop.
+private bool resolveConstantName(istring name, DSymbol* symbol, Scope* moduleScope,
+	out istring memberName)
+{
+	memberName = istring.init;
+	auto target = moduleScope.getFirstSymbolByNameAndCursor(name, symbol.location);
+	if (target is null)
+		return false;
+	if (target.constantValue.length > 0)
+	{
+		memberName = target.constantValue;
+		return true;
+	}
+	if (target.kind == CompletionKind.aliasName && target.type !is null
+		&& target.type.constantValue.length > 0)
+	{
+		memberName = target.type.constantValue;
+		return true;
+	}
+	return false;
+}
+
+/// Whether an alias still points at an operand that was unresolved when it
+/// ran: null-typed variables, functions, enum members and aliases down the
+/// chain (`alias T = typeof(x)` forwarding to `x` before `x` resolved).
+/// Healthy aliases (`alias A = int`, `alias M = <resolved member>`) answer no.
+private bool aliasNeedsRetry(DSymbol* symbol)
+{
+	if (symbol is null || symbol.type is null)
+		return true;
+	DSymbol* t = symbol.type;
+	size_t n = 0;
+	while (t !is null && n++ < 10)
+	{
+		if (t.type is null)
+			return t.kind == CompletionKind.variableName
+				|| t.kind == CompletionKind.memberVariableName
+				|| t.kind == CompletionKind.functionName
+				|| t.kind == CompletionKind.enumMember
+				|| t.kind == CompletionKind.aliasName;
+		t = t.type;
+	}
+	return false;
+}
+
 /// Resolves everything up to a declared type's suffixes: the operand of a type
 /// constructor (`const(T)`) fully, or the base name chain with the lookup's
 /// template arguments applied.
@@ -383,10 +596,16 @@ private TypeNodeOutcome resolveDeclaredType(const(Type) type, DSymbol* symbol, T
 	else if (t2.typeIdentifierPart !is null)
 		return resolveTypeIdentifierChain(t2.typeIdentifierPart, symbol, lookup,
 			moduleScope, cache, mapping, current, missingName);
+	else if (t2.typeofExpression !is null)
+		return resolveTypeofExpression(t2.typeofExpression, symbol, lookup,
+			moduleScope, cache, mapping, current, missingName);
+	else if (t2.traitsExpression !is null)
+		return resolveTraitsExpression(t2.traitsExpression, symbol, lookup,
+			moduleScope, cache, mapping, current, missingName);
 	else
 	{
-		// `typeof(...)`, `__vector`, a trait or a mixin type: the crumb walk
-		// does not model them either.
+		// `__vector` or a mixin type: the crumb walk does not model them
+		// either.
 		return TypeNodeOutcome.unmodelled;
 	}
 

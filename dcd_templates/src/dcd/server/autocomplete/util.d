@@ -699,9 +699,20 @@ AutocompleteResponse.Completion makeSymbolCompletionInfo(const DSymbol* symbol, 
 	{
 		import dsymbol.conversion.second : typeSwap;
 		DSymbol* type = cast(DSymbol*) symbol.type;
-        ret.typeOf = type.formatType;
-        
-        // only swap for inferred/complex types if the first format failed or we need to resolve members
+		// Display the terminal type, not the next alias: `M value` where
+		// `M => bar => int` completes as `int`. Only aliases are followed,
+		// and only within the symbol's own file: a name imported from
+		// another module (`string` from object.d, `File` from std.stdio) is
+		// interface vocabulary and keeps its name. Every other kind formats
+		// exactly as before.
+		size_t aliasDepth = 0;
+		while (type !is null && type.kind == CompletionKind.aliasName
+			&& type.type !is null && aliasDepth++ < 16
+			&& type.symbolFile.length > 0 && type.symbolFile == symbol.symbolFile)
+			type = type.type;
+		ret.typeOf = type is null ? "" : type.formatType;
+
+		// only swap for inferred/complex types if the first format failed or we need to resolve members
 		typeSwap(type);
 		if (type && !ret.typeOf.length)
 			ret.typeOf = type.formatType;

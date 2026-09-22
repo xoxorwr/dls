@@ -598,7 +598,17 @@ extern(C) export string[] dcd_hover(const(char)* filename, const(char)* content,
                     {
                         import dsymbol.conversion.second : typeSwap;
                         DSymbol* type = cast(DSymbol*) sym.type;
-                        string typeName = type.formatType();
+                        // Same rule as completion: through same-file aliases to
+                        // the terminal type (`M value` hovers as `int value;`,
+                        // while `string` keeps its imported name).
+                        size_t aliasDepth = 0;
+                        while (type !is null
+                            && type.kind == CompletionKind.aliasName
+                            && type.type !is null && aliasDepth++ < 16
+                            && type.symbolFile.length > 0
+                            && type.symbolFile == sym.symbolFile)
+                            type = type.type;
+                        string typeName = type is null ? "" : type.formatType();
 
                         switch(type.kind) {
                             case CompletionKind.structName: typeName = "struct " ~ typeName; break; 
@@ -639,12 +649,20 @@ extern(C) export string[] dcd_hover(const(char)* filename, const(char)* content,
                     {
                         import dsymbol.conversion.second : typeSwap;
                         DSymbol* type = cast(DSymbol*) sym.type;
-                        string typeName = type.formatType();
-                        
+                        // Follow the whole chain: `alias M = getMember(...)`
+                        // lands on another alias (`bar`), and the useful type
+                        // is at the end (`int`), not the next hop.
+                        size_t depth = 0;
+                        while (type !is null
+                            && type.kind == CompletionKind.aliasName
+                            && type.type !is null && depth++ < 8)
+                            type = type.type;
+                        string typeName = type is null ? "" : type.formatType();
+
                         typeSwap(type);
                         if (type && typeName.length == 0)
                             typeName = type.formatType();
-                        
+
                         if (typeName.length > 0)
                             value ~= typeName;
                         else

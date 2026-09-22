@@ -351,6 +351,7 @@ final class FirstPass : ASTVisitor
 			symbol.parent = currentSymbol;
 			symbol.acSymbol.protection = protection.current;
 			symbol.acSymbol.doc = makeDocumentation(declarator.comment);
+			foldStringInitializer(declarator.initializer, symbol.acSymbol);
 			currentSymbol.addChild(symbol, true);
 			currentScope.addSymbol(symbol.acSymbol, false);
 
@@ -446,11 +447,12 @@ final class FirstPass : ASTVisitor
 		{
 			foreach (part; dec.autoDeclaration.parts)
 			{
-				SemanticSymbol* symbol = allocateSemanticSymbol(
-					part.identifier.text, CompletionKind.variableName,
-					symbolFile, part.identifier.index);
-				symbol.parent = currentSymbol;
-				populateInitializer(symbol, part.initializer);
+			SemanticSymbol* symbol = allocateSemanticSymbol(
+				part.identifier.text, CompletionKind.variableName,
+				symbolFile, part.identifier.index);
+			symbol.parent = currentSymbol;
+			populateInitializer(symbol, part.initializer);
+			foldStringInitializer(part.initializer, symbol.acSymbol);
 				symbol.acSymbol.protection = protection.current;
 				symbol.acSymbol.doc = makeDocumentation(dec.comment);
 				currentSymbol.addChild(symbol, true);
@@ -1783,6 +1785,30 @@ istring lastTypeIdentifierName(const TypeIdentifierPart tip)
 	return last;
 }
 
+
+/// Records the value of `= "literal"` on the symbol, so later passes can fold
+/// a manifest constant (`enum name = "bar"`) without re-reading the tree.
+/// Only a single plain-quoted literal is folded; anything else leaves the
+/// symbol's `constantValue` empty.
+void foldStringInitializer(const Initializer init, DSymbol* symbol)
+{
+	if (init is null || init.nonVoidInitializer is null
+		|| init.nonVoidInitializer.assignExpression is null)
+		return;
+	auto expr = init.nonVoidInitializer.assignExpression;
+	if (expr.tokens.length != 1)
+		return;
+	auto t = expr.tokens[0];
+	if (t.type != tok!"stringLiteral" && t.type != tok!"wstringLiteral"
+		&& t.type != tok!"dstringLiteral")
+		return;
+	if (t.text.length < 2)
+		return;
+	immutable char q = t.text[0];
+	if ((q != '"' && q != '\'' && q != '`') || t.text[$ - 1] != q)
+		return;
+	symbol.constantValue = internString(t.text[1 .. $ - 1]);
+}
 
 static istring convertChainToImportPath(const IdentifierChain ic)
 {

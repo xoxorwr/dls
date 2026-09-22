@@ -450,6 +450,14 @@ struct DSymbol
 	istring typeSymbolName;
 
 	/**
+	 * The string a manifest constant (`enum name = "bar"`) was initialized
+	 * with, unquoted.  Only the single-literal shape is folded; anything else
+	 * leaves this empty.  Used to resolve `__traits(getMember, T, name)` where
+	 * the member name arrives through a constant instead of a literal.
+	 */
+	istring constantValue;
+
+	/**
 	 * For a symbol built by instantiating a template (`instantiateSymbol` in
 	 * `dsymbol.conversion.second`): the generic symbol it was instantiated
 	 * from, and the arguments it was instantiated with, in declaration order.
