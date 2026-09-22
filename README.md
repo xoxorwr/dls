@@ -8,7 +8,8 @@ language](https://dlang.org/), built on a fork of
 > **Work in progress.**
 
 - **Completion**, including template instances, UFCS, `alias this` and `.ENUM`
-- **Hover**, **go to definition**, **document symbols**, **signature help**
+- **Hover**, **go to definition**, **document symbols**, **signature help**,
+  **semantic highlighting** (`textDocument/semanticTokens/full`)
 - **Diagnostics** from your own checkers, published on save and on external change
 - **Editor agnostic**: one watched `dls.json` at the workspace root; the server
   reads nothing from the client

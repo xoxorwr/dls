@@ -42,10 +42,10 @@ import std.conv : to;
  */
 ScopeSymbolPair generateAutocompleteTrees(const(Token)[] tokens,
 	RollbackAllocator* parseAllocator,
-	size_t cursorPosition, ref ModuleCache cache)
+	size_t cursorPosition, ref ModuleCache cache, bool parseWholeFile = false)
 {
 	Module m = parseModuleForAutocomplete(tokens, internString("stdin"),
-		parseAllocator, cursorPosition);
+		parseAllocator, cursorPosition, false, parseWholeFile);
 
 	scope first = new FirstPass(m, internString("stdin"), &cache);
 	first.run();
@@ -104,7 +104,8 @@ Module parseModuleSimple(const(Token)[] tokens, string fileName, RollbackAllocat
 private:
 
     Module parseModuleForAutocomplete(const(Token)[] tokens, string fileName,
-        RollbackAllocator* parseAllocator, size_t cursorPosition, bool importC = false)
+        RollbackAllocator* parseAllocator, size_t cursorPosition, bool importC = false,
+        bool parseWholeFile = false)
     {
         scope parser = new AutocompleteParser();
         parser.fileName = fileName;
@@ -113,6 +114,7 @@ private:
         parser.allocator = parseAllocator;
         parser.cursorPosition = cursorPosition;
         parser.importC = importC;
+        parser.parseWholeFile = parseWholeFile;
         return parser.parseModule();
     }
 
@@ -402,7 +404,10 @@ class AutocompleteParser : Parser
 		// own `return` statements, so the body has to be parsed even though it
 		// lies entirely before the cursor.  `parseFunctionDeclaration` raises
 		// this for the duration of such a function.
-		if (parseAutoFunctionBody)
+		// `parseWholeFile` asks for the same for the walks that are not tied to
+		// a cursor at all (semantic tokens): they need the names of every
+		// block, not just of the one a completion can happen in.
+		if (parseAutoFunctionBody || parseWholeFile)
 			return super.parseBlockStatement();
 		if (current.index > cursorPosition)
 		{
@@ -451,6 +456,10 @@ class AutocompleteParser : Parser
 	}
 
 	bool parseAutoFunctionBody;
+
+	/// Parse every block, not only the one the cursor sits in; the cursor then
+	/// only drives the error recovery around it.
+	bool parseWholeFile;
 
 private:
 	size_t cursorPosition;

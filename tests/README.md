@@ -35,6 +35,7 @@ far the most expensive part of a run.
 | `test_definition.py` | `textDocument/definition` |
 | `test_document_symbols.py` | outline symbols, kinds, ranges |
 | `test_signature_help.py` | overloads, parameters, active parameter |
+| `test_semantic_tokens.py` | the token legend and the tokens of a file |
 | `test_diagnostics.py` | the `check` command pipeline in `dls.json` |
 | `test_document_sync.py` | didOpen/didChange/didSave/didClose, open-document table |
 | `test_notification_robustness.py` | malformed, late or wrongly-typed notifications and unopened documents |
@@ -145,9 +146,6 @@ its file is opened, changed or saved again.
   `docs/breadcrumb-replacement.md`, where inferring it is one of the things the
   typed path is meant to make easy.
 * (None for the buffer/cache split — that is deliberate, see below.)
-* The `semanticTokens` handlers are routed in `main.d` but never send a
-  response, so they cannot be tested with this client yet (a request would
-  simply time out).
 * `textDocument/definition` currently resolves variables to their type
   declaration; jumps to function definitions return an empty list.
 

@@ -486,6 +486,11 @@ class LspClient:
             "textDocument/signatureHelp", self._position_params(uri, line, character)
         )
 
+    def semantic_tokens(self, uri: str) -> dict[str, Any]:
+        return self.request(
+            "textDocument/semanticTokens/full", {"textDocument": {"uri": uri}}
+        )
+
     # -- lifecycle ---------------------------------------------------------
 
     def close(self) -> None:
@@ -578,6 +583,9 @@ class Doc:
 
     def signature_help(self, needle: str, offset: int = 0, occurrence: int = 0):
         return self.client.signature_help(self.uri, *self.position(needle, offset, occurrence))
+
+    def semantic_tokens(self):
+        return self.client.semantic_tokens(self.uri)
 
     def document_symbols(self):
         return self.client.document_symbols(self.uri)

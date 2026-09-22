@@ -24,9 +24,14 @@ import core.stdc.stdarg;
 
 import dcd.common.messages;
 import dcd.server.autocomplete;
+import dcd.server.autocomplete.util;
 
+import dparse.lexer;
+
+import dsymbol.scope_;
 import dsymbol.symbol;
 import dsymbol.modulecache;
+import dsymbol.utils;
 
 
 __gshared:
@@ -304,9 +309,232 @@ extern(C) export DSymbolInfo[] dcd_document_symbols(const(char)* filename, const
     return ret;
 }
 
-extern(C) export DSymbolInfo[] dcd_document_symbols_sem(const(char)* filename, const(char)* content)
+/**
+ * One semantic token: the byte range in the file a client should colour, and
+ * what it is.  `type` and `modifiers` are indices into the legend the client
+ * was given with `initialize` (see `enable_semantic_tokens` in
+ * `server/dls/initialize.d`, which lists the names in this order).
+ */
+struct DSemanticToken
 {
-    import containers.ttree : TTree;
+    size_t start;
+    size_t length;
+    ubyte type;
+    ubyte modifiers;
+}
+
+/**
+ * Token types `dcd_semantic_tokens` reports.  The values are legend indices,
+ * so the client's legend has to list these names in this order; the ones no
+ * symbol maps to yet are kept anyway, so the indices stay readable.
+ */
+enum DSemanticTokenType : ubyte
+{
+    none = ubyte.max,
+    namespace_ = 0,
+    type = 1,
+    class_ = 2,
+    enum_ = 3,
+    interface_ = 4,
+    struct_ = 5,
+    typeParameter = 6,
+    /// Nothing maps here yet: DCD records a parameter as a variable.
+    parameter = 7,
+    variable = 8,
+    property = 9,
+    enumMember = 10,
+    function_ = 12,
+    keyword = 15,
+    /// Nothing maps here yet: D's modifiers are keywords to the lexer.
+    modifier = 16,
+    comment = 17,
+    string = 18,
+    number = 19,
+    operator = 21,
+}
+
+/// Token modifiers, as bit positions in the client's modifier legend.
+enum DSemanticTokenModifier : ubyte
+{
+    declaration = 0,
+    readonly = 2,
+    defaultLibrary = 9,
+}
+
+alias DSemanticModifiers = ubyte;
+
+/// Whether the token is a number literal (`10`, `1.5`, `2L`, ...).
+private bool isNumberLiteral(IdType type) pure nothrow @safe @nogc
+{
+    static foreach (T; NumberLiterals)
+        if (type == T)
+            return true;
+    return false;
+}
+
+/// Whether the token is a string literal (any of the three widths).
+private bool isStringLiteral(IdType type) pure nothrow @safe @nogc
+{
+    static foreach (T; StringLiterals)
+        if (type == T)
+            return true;
+    return false;
+}
+
+/// Whether a token is punctuation rather than an operator: nothing a theme
+/// wants to paint differently from the surrounding code.
+private bool isPunctuation(IdType type) pure nothrow @safe @nogc
+{
+    switch (type)
+    {
+    case tok!"(":
+    case tok!")":
+    case tok!"{":
+    case tok!"}":
+    case tok!"[":
+    case tok!"]":
+    case tok!",":
+    case tok!";":
+    case tok!":":
+    case tok!".":
+    case tok!"@":
+        return true;
+    default:
+        return false;
+    }
+}
+
+/// The token type a symbol's `CompletionKind` is shown as.
+private ubyte semanticTokenTypeOf(CompletionKind kind) pure nothrow @safe @nogc
+{
+    switch (kind)
+    {
+    case CompletionKind.className:
+        return DSemanticTokenType.class_;
+    case CompletionKind.interfaceName:
+        return DSemanticTokenType.interface_;
+    case CompletionKind.structName:
+    case CompletionKind.unionName:
+        return DSemanticTokenType.struct_;
+    case CompletionKind.enumName:
+        return DSemanticTokenType.enum_;
+    case CompletionKind.enumMember:
+        return DSemanticTokenType.enumMember;
+    case CompletionKind.variableName:
+        return DSemanticTokenType.variable;
+    case CompletionKind.memberVariableName:
+        return DSemanticTokenType.property;
+    case CompletionKind.functionName:
+    case CompletionKind.ufcsName:
+        return DSemanticTokenType.function_;
+    case CompletionKind.packageName:
+    case CompletionKind.moduleName:
+        return DSemanticTokenType.namespace_;
+    case CompletionKind.templateName:
+    case CompletionKind.mixinTemplateName:
+    case CompletionKind.aliasName:
+        return DSemanticTokenType.type;
+    case CompletionKind.typeTmpParam:
+    case CompletionKind.variadicTmpParam:
+        return DSemanticTokenType.typeParameter;
+    case CompletionKind.keyword:
+        // The builtin properties (`sizeof`, `init`, `mangleof`, ...).
+        return DSemanticTokenType.property;
+    default:
+        return DSemanticTokenType.none;
+    }
+}
+
+/**
+ * The symbol an identifier token names and what that symbol is.
+ *
+ * The scope tree only holds the names that are visible where they are
+ * written, which is what a declaration and a plain use need; a member after a
+ * `.` (`state.valuea`) is resolved through the expression walk instead, the
+ * same way hover does it.
+ */
+private ubyte identifierTokenType(const(Token) token, const(Token)[] parserTokens,
+    size_t parserIndex, Scope* symbolScope, out DSemanticModifiers modifiers)
+{
+    auto expression = getExpression(parserTokens[0 .. parserIndex + 1]);
+    auto symbols = getSymbolsByTokenChain(symbolScope, expression, token.index,
+        CompletionType.location);
+    if (symbols.length == 0 || symbols[0] is null)
+        return DSemanticTokenType.none;
+
+    auto symbol = symbols[0];
+    // A function with a body records the end of its name as its location
+    // (`FirstPass.visit(FunctionDeclaration)` puts its scope there) instead of
+    // the name's start, so both spellings have to mean "declaration".
+    immutable bool functionName = symbol.kind == CompletionKind.functionName
+        || symbol.kind == CompletionKind.ufcsName;
+    if (symbol.location == token.index
+        || (functionName && token.text.length > 0
+            && symbol.location == token.index + token.text.length))
+        modifiers |= 1 << DSemanticTokenModifier.declaration;
+    // Anything that is not part of the file being coloured comes from a
+    // module the client did not ask about - `object.d` for `string`, an
+    // import path for a project module - which is what the modifier is for.
+    if (symbol.symbolFile.length > 0 && symbol.symbolFile != "stdin")
+        modifiers |= 1 << DSemanticTokenModifier.defaultLibrary;
+    if (symbol.kind == CompletionKind.enumMember
+        || symbol.kind == CompletionKind.typeTmpParam
+        || symbol.kind == CompletionKind.variadicTmpParam)
+        modifiers |= 1 << DSemanticTokenModifier.readonly;
+
+    return semanticTokenTypeOf(symbol.kind);
+}
+
+/**
+ * The type of one token, or `DSemanticTokenType.none` when there is nothing
+ * to say about it (whitespace, or an identifier no symbol was found for, in
+ * which case the client's grammar keeps colouring it).
+ */
+private ubyte semanticTokenType(const(Token) token, const(Token)[] parserTokens,
+    size_t parserIndex, Scope* symbolScope, out DSemanticModifiers modifiers)
+{
+    modifiers = 0;
+
+    // Trivia and the end-of-file marker are not code: the file end would
+    // otherwise be coloured as the keyword it is spelled like.
+    if (token.type == tok!"\0" || token.type == tok!"__EOF__"
+        || token.type == tok!"whitespace" || token.type == tok!"specialTokenSequence")
+        return DSemanticTokenType.none;
+    if (token.type == tok!"comment")
+        return DSemanticTokenType.comment;
+    if (isBasicType(token.type))
+    {
+        // The builtin types are the language's own default library.
+        modifiers |= 1 << DSemanticTokenModifier.defaultLibrary;
+        return DSemanticTokenType.type;
+    }
+    if (isKeyword(token.type) || isSpecialToken(token.type))
+        return DSemanticTokenType.keyword;
+    if (isNumberLiteral(token.type))
+        return DSemanticTokenType.number;
+    if (isStringLiteral(token.type) || token.type == tok!"characterLiteral")
+        return DSemanticTokenType.string;
+    if (token.type == tok!"identifier")
+        return identifierTokenType(token, parserTokens, parserIndex, symbolScope, modifiers);
+    if (isOperator(token.type) && !isPunctuation(token.type))
+        return DSemanticTokenType.operator;
+    return DSemanticTokenType.none;
+}
+
+/// The length of a token as written: a keyword or a punctuation token carries
+/// its spelling as its type (`text` is null for those).
+private size_t tokenLength(const(Token) token) pure nothrow @safe @nogc
+{
+    return token.text is null ? str(token.type).length : token.text.length;
+}
+
+/**
+ * Classifies every token of the file: what is on screen per byte range, so a
+ * client can colour the parts its grammar cannot know (which name is a type,
+ * which is a variable, which member of what).
+ */
+extern(C) export DSemanticToken[] dcd_semantic_tokens(const(char)* filename, const(char)* content)
+{
     import containers.hashset;
     import dcd.server.autocomplete.util;
 
@@ -320,79 +548,60 @@ extern(C) export DSymbolInfo[] dcd_document_symbols_sem(const(char)* filename, c
     import dsymbol.scope_;
     import dsymbol.string_interning;
     import dsymbol.symbol;
-    //import dsymbol.ufcs;
     import dsymbol.utils;
 
-    import dcd.common.constants;
-    import dcd.common.messages;
+    DSemanticToken[] ret;
+    if (content is null)
+        return ret;
+    auto source = cast(ubyte[]) fromStringz(content);
+    if (source.length == 0)
+        return ret;
 
-    DSymbolInfo[] ret;
+    auto sc = StringCache(source.length.optimalBucketCount);
 
-    AutocompleteRequest request;
-    request.fileName = cast(string) fromStringz(filename);
-    request.cursorPosition = 0;
-    request.kind |= RequestKind.autocomplete;
-    request.sourceCode = cast(ubyte[]) fromStringz(content);
+    // The parser's tokens and the scope tree.  The whole file is parsed
+    // (`parseWholeFile`): the autocomplete parser otherwise keeps only the
+    // block a cursor sits in, since nothing behind a cursor can be completed -
+    // but this walk has to know every name, including the locals of blocks no
+    // completion could be about.  The cursor still marks where the file is
+    // being typed, so the end of it keeps the recovery for an unfinished
+    // statement; resolving a token then happens by position
+    // (`getScopeByCursor`), which is where the name it names is visible.
+    LexerConfig parserConfig;
+    parserConfig.fileName = "";
+    auto parserTokens = getTokensForParser(source, parserConfig, &sc);
 
-    LexerConfig config;
-    config.fileName = "";
-    auto sc = StringCache(request.sourceCode.length.optimalBucketCount);
-    auto tokenArray = getTokensForParser(cast(ubyte[]) request.sourceCode, config, &sc);
     RollbackAllocator rba;
-    auto pair = generateAutocompleteTrees(tokenArray, &rba, -1, cache);
+    auto pair = generateAutocompleteTrees(parserTokens, &rba, source.length, cache, true);
     scope(exit) pair.destroy();
 
+    // The raw token stream of the same file: no whitespace (there is nothing
+    // to colour), and the comments kept as tokens so they get a type too.
+    LexerConfig config;
+    config.fileName = "";
+    config.whitespaceBehavior = WhitespaceBehavior.skip;
+    auto lexer = DLexer(source, config, &sc);
 
-    size_t e;
-
-    void check(DSymbol* it)
+    // `parserTokens` has no comments, so the two streams are walked in
+    // lockstep: `parserIndex` is the token the current one is, or the one it
+    // follows.
+    size_t parserIndex = 0;
+    while (!lexer.empty)
     {
-        //for (int i = 0; i < p; i++)
-        //fprintf(stderr, " ");
-        //fprintf(stderr, "loc: %ld k: %c sym: %.*s\n", it.location, cast(char) it.kind, it.name.length, it.name.ptr);
+        auto token = lexer.front;
+        lexer.popFront();
 
-        if (it.type != null)
-        {
-            DSymbolInfo info;
-            info.name = it.type.name;
-            info.range[0] = it.type.location;
-            //if (it.type.location_end == 0)
-            //    info.range[1] = it.type.location + it.type.name.length;
-            //else
-            //    info.range[1] = it.type.location_end;
-            info.kind = it.type.kind;
-            ret ~= info;
-        }
+        while (parserIndex < parserTokens.length && parserTokens[parserIndex].index < token.index)
+            parserIndex++;
 
-        {
-            DSymbolInfo info;
-            info.name = it.name;
-            info.range[0] = it.location;
-            //if (it.location_end == 0)
-            //    info.range[1] = it.location + it.name.length;
-            //else
-            //    info.range[1] = it.location_end;
-
-            info.kind = it.kind;
-            ret ~= info;
-        }
-
-
-
-        foreach(sym; it.opSlice())
-        {
-            if (sym.symbolFile != "stdin") continue;
-            if (sym.generated) continue;
-
-            check(sym);
-       }
-    }
-
-    foreach (symbol; pair.scope_.symbols)
-    {
-        if (symbol.symbolFile != "stdin") continue;
-        if (symbol.generated) continue;
-        check(symbol);
+        DSemanticModifiers modifiers;
+        auto type = semanticTokenType(token, parserTokens, parserIndex, pair.scope_, modifiers);
+        if (type == DSemanticTokenType.none)
+            continue;
+        auto length = tokenLength(token);
+        if (length == 0)
+            continue;
+        ret ~= DSemanticToken(token.index, length, type, modifiers);
     }
 
     return ret;

@@ -152,7 +152,21 @@ struct DSymbolInfo
 }
 
 extern(C) DSymbolInfo[] dcd_document_symbols(const(char)* filename, const(char)* content);
-extern(C) DSymbolInfo[] dcd_document_symbols_sem(const(char)* filename, const(char)* content);
+
+/**
+ * One semantic token: a byte range in the file, its type and its modifiers.
+ * The type and the modifier bits are indices into the token legend the server
+ * sends with `initialize` (`enable_semantic_tokens` in `dls/initialize.d`).
+ */
+struct DSemanticToken
+{
+    size_t start;
+    size_t length;
+    ubyte type;
+    ubyte modifiers;
+}
+
+extern(C) DSemanticToken[] dcd_semantic_tokens(const(char)* filename, const(char)* content);
 
 
 

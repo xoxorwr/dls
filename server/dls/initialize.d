@@ -40,7 +40,7 @@ void lsp_initialize(int id, JsonNode* params_json) {
     auto saveOptions = json.add_object_to_object(sync, "save");
     json.add_bool_to_object(saveOptions, "includeText", 1);
 
-    //enable_semantice_tokens(capabilities);
+    enable_semantic_tokens(capabilities);
     enable_completion(capabilities);
     enable_signature_help(capabilities);
 
@@ -237,7 +237,14 @@ void enable_signature_help(JsonNode* capabilities)
     json.add_item_to_object(signatureHelp, "retriggerCharacters", retriggerCharacters);
 }
 
-void enable_semantice_tokens(JsonNode* capabilities) {
+/**
+ * Advertises the semantic token legend.
+ *
+ * The token type and modifier positions are what `DSemanticTokenType` and
+ * `DSemanticTokenModifier` in `dcd_templates/src/dcd/server/dll.d` index into,
+ * so the two lists have to stay in step.
+ */
+void enable_semantic_tokens(JsonNode* capabilities) {
     const(char*)[27] tok_types = [
         "namespace",       // 0
         "type",            // 1
