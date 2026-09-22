@@ -36,7 +36,7 @@ endif
 
 VSCODE_DIR := editors/vscode
 
-.PHONY: all dcd dls test build-vscode clean
+.PHONY: all dcd dls test build-vscode windows clean
 
 all: dls
 
@@ -52,6 +52,30 @@ dls: dcd
 
 test: dls
 	python3 run_tests.py
+
+# Windows binary, for testing the parts of the server that only differ there
+# (the C runtime's text mode, the share mode a handle asks for, the lexer on a
+# CRLF or BOM file).  On Windows itself plain `make` builds bin/dls.exe; this
+# target is for Linux, where the Windows compiler is the one inside a wine
+# prefix.  Override WIN_DC / WINEPREFIX when your setup differs.
+WINEPREFIX ?= $(HOME)/.wine
+# Forward slashes on purpose: make and the shell both eat backslashes, and
+# wine takes the path either way.
+WIN_DC ?= C:/D/ldc2/bin/ldmd2.exe
+WIN_LIB := dcd_templates/libdcd.lib
+WIN_DCD_SRC := $(shell find dcd_templates/src -name '*.d')
+WIN_SERVER_SRC := $(shell find server -name '*.d')
+
+export WINEPREFIX
+
+windows: bin/dls.exe
+
+bin/dls.exe: $(WIN_DCD_SRC) $(WIN_SERVER_SRC)
+	@mkdir -p bin
+	wine $(WIN_DC) -lib -of=$(WIN_LIB) $(OPTIMIZE) -w -version=built_with_dub \
+	    -Idcd_templates/src $(WIN_DCD_SRC) -preview=bitfields -vcolumns
+	wine $(WIN_DC) -of=bin/dls.exe $(OPTIMIZE) -preview=rvaluerefparam \
+	    -preview=bitfields -i -Iserver server/dls/main.d $(WIN_LIB)
 
 build-vscode:
 	cd $(VSCODE_DIR) && npm ci
