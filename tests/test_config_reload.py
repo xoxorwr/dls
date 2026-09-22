@@ -279,3 +279,38 @@ class CreatedConfigTests(ConfigReloadTestCase):
 
         self.assertEqual(labels(app.completion("w.si")["items"]), [])
         self.reloaded(mark)
+
+
+class ConfigFileHandleTests(DlsTestCase):
+    """The server must not keep a handle on the files it reads.
+
+    On Windows an open handle is a lock: dls.json was opened once at
+    initialize and never closed, and the editor could not save the file the
+    server was reading its configuration from
+    (`Failed to save 'dls.json' ... EBUSY: resource busy or locked`).  The
+    same leak sat in the read of an unopened document's text.  There is no
+    portable way to see a leaked handle from the outside, but on Linux
+    /proc/<pid>/fd shows every file the process still has open.
+    """
+
+    PROJECT = {"app.d": "module app;\n\nvoid main() {}\n"}
+
+    def test_the_server_holds_no_file_open_under_the_workspace(self):
+        fd_dir = f"/proc/{self.client.process.pid}/fd"
+        if not os.path.isdir(fd_dir):
+            self.skipTest("no /proc on this platform")
+
+        # A request makes sure the server has read dls.json (it does that at
+        # initialize) and cached the document before the handles are counted.
+        doc = self.open_doc("app.d")
+        doc.document_symbols()
+
+        held = []
+        for fd in os.listdir(fd_dir):
+            try:
+                target = os.readlink(os.path.join(fd_dir, fd))
+            except OSError:  # the fd was closed while we looked at it
+                continue
+            if target.startswith(self.root + os.sep):
+                held.append(target)
+        self.assertEqual(held, [], "the server kept these workspace files open")

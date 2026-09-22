@@ -83,6 +83,22 @@ extern(C) void main(int argc, char** argv) {
     LOG_FLAG.warn = true;
     LOG_FLAG.erro = true;
 
+    version (Windows) {
+        // The protocol is a byte stream, but the C runtime opens the standard
+        // streams in text mode, where every '\n' that is written becomes
+        // "\r\n" and every "\r\n" that is read becomes '\n'.  The framing
+        // already spells its own "\r\n", so a text-mode stdout puts
+        // "Content-Length: N\r\r\n\r\r\n" on the wire - a client that looks
+        // for the end of the header never finds it inside that, and stops
+        // reading responses (the initialize response is the only one some of
+        // them get through).  Reading would be thrown off the same way by a
+        // payload that carries a raw '\r', and the length in the header counts
+        // bytes, so both ends are set to binary.
+        import core.stdc.stdio : _setmode, _O_BINARY;
+        _setmode(0, _O_BINARY); // stdin
+        _setmode(1, _O_BINARY); // stdout
+    }
+
     import rt.crash_handler;
     rt_register_crash_handler();
 
@@ -813,6 +829,10 @@ char[] read_dls_json(const(char)[] path, mem.Allocator alloc) {
     fs.File file;
     if (!file.open(path))
         return null;
+    // The handle has to go back before this function returns: on Windows an
+    // open handle is a lock, and this one would keep the editor from saving
+    // the very file the server is reading its configuration from.
+    scope(exit) file.close();
 
     auto size = file.size();
     auto buffer = alloc.alloc!char(size + 1);

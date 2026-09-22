@@ -47,6 +47,7 @@ far the most expensive part of a run.
 | `test_acyclic_dependencies.py` | multi-level non-circular import chains |
 | `test_edit_public_imported_module.py` | editing a module other modules import |
 | `test_enum_completion.py` | `.MEMBER` enum shorthand completion |
+| `test_bom.py` | a leading byte order mark does not shift any position |
 | `test_manifest_constants.py` | the type of an `enum name = <initializer>;` constant |
 | `test_struct_initializer.py` | field completion in `{ ... }` struct literals |
 | `test_anonymous_struct.py` | named variables of anonymous struct type |
@@ -236,6 +237,33 @@ rest of the action axis.
 
 
 ## Regressions that were fixed (keep these tests)
+
+* `test_bom.ByteOrderMarkTests` — the lexer sliced a UTF-8 BOM off its input
+  instead of walking past it, so every token index was three bytes short of
+  the byte offset the server computes for an editor position.  A file that
+  starts with a BOM was inert: no member completion and no hover, on every
+  platform.  The lexer now starts at offset 3 with the BOM still in its input,
+  which keeps token indices equal to file offsets.
+
+* `test_config_reload.ConfigFileHandleTests` — `read_dls_json` opened
+  `dls.json` and never closed it, and `File.open` on Windows asked for
+  `FILE_SHARE_READ` only.  Together those made the editor unable to save the
+  server's own configuration file (`Failed to save 'dls.json' ... EBUSY:
+  resource busy or locked`): the handle is closed on every path now
+  (`scope(exit)`), the read shares the file with writers and deleters, and
+  `read_file_cstring` — the read of an unopened document's text — no longer
+  leaks its handle either.  The test looks for open workspace files in
+  `/proc/<pid>/fd`, which is where a leaked handle is visible on Linux; on
+  Windows that same handle is a lock.
+
+* The Windows wire format (no test of its own — the harness reads responses
+  strictly, and now says why when the framing is wrong): `send_message` spells
+  `"\r\n"` itself, but on Windows the C runtime opened stdout in text mode and
+  turned every `\n` into `\r\n`, putting `Content-Length: N\r\r\n\r\r\n` on the
+  wire.  No client can find the end of that header, so nothing after the first
+  response was readable - initialize answered, everything else timed out.  The
+  server now sets stdin and stdout to binary mode at startup; the harness's
+  reader reports the `\r\r\n` explicitly instead of just timing out.
 
 * `test_imports.RenamedSelectiveImportTests` — `import lib : name = other;`
   used to kill the server (exit code 255, stack trace, and every request

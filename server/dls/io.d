@@ -95,6 +95,7 @@ char* read_file_cstring(mem.Allocator alloc, const char * uri) {
         LWARN("file: '{}' doesn't exist", uri);
         return null;
     }
+    scope(exit) file.close();
     auto s = file.size();
     auto b = alloc.alloc!char(s + 1);
     b[s] = 0;

@@ -247,6 +247,16 @@ class LspClient:
             if not chunk:
                 return None
             header += chunk
+            if header.endswith(b"\r\r\n"):
+                # A server that writes its framing through a text-mode stream
+                # puts "\r\r\n" on the wire: the newline it spelled itself got
+                # a carriage return in front of it.  Nothing after that can be
+                # found by a client looking for "\r\n\r\n", so say so instead
+                # of waiting for a response that cannot be read.
+                raise DlsError(
+                    "response header is not CRLF framed: the server wrote "
+                    "text-mode newlines (Content-Length: N\\r\\r\\n\\r\\r\\n)"
+                )
 
         length = None
         for line in header.decode("ascii", "replace").split("\r\n"):

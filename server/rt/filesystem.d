@@ -19,8 +19,8 @@ else
 version (Windows)
 {
     import core.sys.windows.windef : HANDLE, LPDWORD, DWORD,
-        SECURITY_ATTRIBUTES, GENERIC_READ, FILE_SHARE_READ, FILE_ATTRIBUTE_NORMAL,
-        GENERIC_WRITE;
+        SECURITY_ATTRIBUTES, GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FILE_SHARE_DELETE, FILE_ATTRIBUTE_NORMAL, GENERIC_WRITE;
     import core.sys.windows.winbase : OPEN_EXISTING, INVALID_HANDLE_VALUE,
         CREATE_ALWAYS,
         GetFileSize, CreateFileA, CloseHandle, WriteFile, FlushFileBuffers,
@@ -124,7 +124,14 @@ struct InputFile
     {
         version (Windows)
         {
-            handle = cast(HANDLE) CreateFileA(path.ptr, GENERIC_READ, FILE_SHARE_READ, null, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, null);
+            // Share the file with everyone: this handle only reads, and a
+            // reader that asks for the file to itself locks out the editor.
+            // Windows refuses to write to (or replace) a file that is open
+            // without FILE_SHARE_WRITE / FILE_SHARE_DELETE, which is what an
+            // editor's save does - `Failed to save 'dls.json' ... EBUSY`.
+            handle = cast(HANDLE) CreateFileA(path.ptr, GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, null,
+                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, null);
             return INVALID_HANDLE_VALUE != handle;
         }
         else version (Posix)
@@ -140,7 +147,7 @@ struct InputFile
     {
         version (Windows)
         {
-            if (INVALID_HANDLE_VALUE != cast(HANDLE) handle)
+            if (handle != null && INVALID_HANDLE_VALUE != cast(HANDLE) handle)
             {
                 CloseHandle(cast(HANDLE) handle);
                 handle = cast(void*) INVALID_HANDLE_VALUE;
@@ -292,7 +299,14 @@ struct File
     {
         version (Windows)
         {
-            handle = cast(HANDLE) CreateFileA(path.ptr, GENERIC_READ, FILE_SHARE_READ, null, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, null);
+            // Share the file with everyone: this handle only reads, and a
+            // reader that asks for the file to itself locks out the editor.
+            // Windows refuses to write to (or replace) a file that is open
+            // without FILE_SHARE_WRITE / FILE_SHARE_DELETE, which is what an
+            // editor's save does - `Failed to save 'dls.json' ... EBUSY`.
+            handle = cast(HANDLE) CreateFileA(path.ptr, GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, null,
+                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, null);
             return INVALID_HANDLE_VALUE != handle;
         }
         else version (Posix)
@@ -308,7 +322,7 @@ struct File
     {
         version (Windows)
         {
-            if (INVALID_HANDLE_VALUE != cast(HANDLE) handle)
+            if (handle != null && INVALID_HANDLE_VALUE != cast(HANDLE) handle)
             {
                 CloseHandle(cast(HANDLE) handle);
                 handle = cast(void*) INVALID_HANDLE_VALUE;

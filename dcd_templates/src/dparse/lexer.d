@@ -632,12 +632,18 @@ public struct DLexer
     if (is(Unqual!(ElementEncodingType!R) : ubyte) && isDynamicArray!R)
     {
         this.haveSSE42 = haveSSE42;
-        auto r = (range.length >= 3 && range[0] == 0xef && range[1] == 0xbb && range[2] == 0xbf)
-            ? range[3 .. $] : range;
+        // A byte order mark is not part of the code, but it is part of the
+        // file: the lexer starts after it rather than dropping it from its
+        // input, so that every token index keeps being the byte offset into
+        // the file a caller handed over.  (Slicing it away silently moved
+        // everything after a BOM three bytes towards the start, which no
+        // editor-relative position agrees with.)
+        immutable size_t bomLength = range.length >= 3 && range[0] == 0xef
+            && range[1] == 0xbb && range[2] == 0xbf ? 3 : 0;
         static if (is(ElementEncodingType!R == immutable))
-            this.range = LexerRange(cast(const(ubyte)[]) r);
+            this.range = LexerRange(cast(const(ubyte)[]) range, bomLength);
         else
-            this.range = LexerRange(cast(const(ubyte)[]) r.idup);
+            this.range = LexerRange(cast(const(ubyte)[]) range.idup, bomLength);
         this.config = config;
         this.cache = cache;
         popFront();
