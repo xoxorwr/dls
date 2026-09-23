@@ -1563,7 +1563,7 @@ extern(C) SignatureHelpResponse dcd_get_signature(const(char)* filename, const(c
 
 	    SignatureInformation sigInfo;
 	    sigInfo.label = resolved.callTip[];
-	    sigInfo.parameters = parseParameters(resolved.callTip[]);
+	    sigInfo.parameters = parseParameters(resolved.callTip[], isTemplateInstantiation);
 	    response.signatures ~= sigInfo;
 	}
 
@@ -1576,24 +1576,34 @@ extern(C) SignatureHelpResponse dcd_get_signature(const(char)* filename, const(c
     return response;
 }
 
-ParameterInformation[] parseParameters(string callTip)
+/**
+ * Params:
+ *     callTip = a symbol's callTip: `"T get(T)(T data)"`, `"void foo(int
+ *         a)"`, `"struct TD(T) {\n    T data;\n}"`, ...
+ *     wantFirstGroup = true for `Name!(...)` (a template instantiation - the
+ *         template parameter list is what belongs here), false for
+ *         `Name(...)` (an ordinary call - the value parameter list, or a
+ *         struct/union's constructor, both already resolved to their own
+ *         callTip by the caller).
+ *
+ * A plain function/constructor callTip has exactly one top-level ('(' at
+ * depth 0) parenthesized group, so `wantFirstGroup` picks the same one
+ * either way. A templated *function's* callTip has two, back to back
+ * (`T get(T)(T data)`: template parameters, then value parameters) - which
+ * one is wanted depends on whether the call site wrote a `!`. A struct/
+ * union's callTip (used only for `Name!(...)`, never a plain call - the
+ * caller resolves that to the constructor's own callTip instead) has only
+ * the one group before its body; a field inside that body - a function
+ * pointer, say - can itself contain parens, but those sit deeper than
+ * depth 0 (the body's own '{' already raised the depth), so they are never
+ * mistaken for a second top-level group there.
+ */
+ParameterInformation[] parseParameters(string callTip, bool wantFirstGroup = false)
 {
     ParameterInformation[] params;
 
-    // The *last* top-level ('(' at depth 0) parenthesized group, not the
-    // first. A plain function's callTip has exactly one - the value
-    // parameter list - so this changes nothing for it. A templated
-    // function's has two back to back (`T get(T)(T data)`: the template
-    // parameter list, then the value one), and it is the second - the call
-    // site's actual arguments - that signature help for a *call* means to
-    // show, not the first. A struct/union's callTip (used instead when
-    // `Name!(...)` is being completed, not called) has only the one group
-    // before its body - a field inside that body, a function pointer say,
-    // can itself contain parens, but those sit deeper than depth 0 (the
-    // body's own '{' already raised the depth), so they are never mistaken
-    // for a second top-level group.
-    size_t openParen = size_t.max;
-    size_t closeParen = size_t.max;
+    static struct Group { size_t open; size_t close; }
+    Group[] groups;
     size_t groupStart = size_t.max;
     int groupDepth = 0;
     foreach (i, c; callTip)
@@ -1609,16 +1619,15 @@ ParameterInformation[] parseParameters(string callTip)
             groupDepth--;
             if (groupDepth == 0 && groupStart != size_t.max)
             {
-                openParen = groupStart;
-                closeParen = i;
+                groups ~= Group(groupStart, i);
                 groupStart = size_t.max;
             }
         }
     }
-    if (openParen == size_t.max || closeParen == size_t.max || closeParen <= openParen)
-        return params;
+    if (groups.length == 0) return params;
 
-    auto paramStr = callTip[openParen + 1 .. closeParen];
+    auto group = wantFirstGroup ? groups[0] : groups[$ - 1];
+    auto paramStr = callTip[group.open + 1 .. group.close];
     if (paramStr.length == 0) return params;
 
     int depth = 0;

@@ -179,3 +179,68 @@ class TemplateInstantiationSignatureHelpTests(DlsTestCase):
 
     def test_a_non_templated_struct_call_is_unaffected(self):
         self.assertEqual(self._params_at("    Plain("), ["int x"])
+
+
+TEMPLATED_FUNCTIONS = """module app;
+
+T get(T)(T data)
+{
+    return data;
+}
+
+T2 combine(A, B)(A a, B b)
+{
+    T2 x;
+    return x;
+}
+
+void noValueParams(T)()
+{
+}
+
+void main()
+{
+    get()
+    get!()
+    combine()
+    combine!()
+    noValueParams()
+    noValueParams!()
+}
+"""
+
+
+class TemplateFunctionSignatureHelpTests(DlsTestCase):
+    """Regression: `Name!(...)` instantiates the template, `Name(...)` calls
+    it - a templated *function*'s callTip has both parameter lists back to
+    back (`T get(T)(T data)`), and which one belongs in the hint depends on
+    which the call site actually wrote. Only the struct/union/class case was
+    fixed at first; a templated function fell through unchanged and showed
+    the value parameter list for `!(` too.
+    """
+
+    PROJECT = {"app.d": TEMPLATED_FUNCTIONS}
+
+    def setUp(self):
+        self.doc = self.open_doc("app.d")
+
+    def _params_at(self, needle):
+        result = self.doc.signature_help(needle)
+        self.assertEqual(len(result["signatures"]), 1)
+        return [p["label"] for p in result["signatures"][0]["parameters"]]
+
+    def test_plain_call_shows_the_value_parameters(self):
+        self.assertEqual(self._params_at("    get("), ["T data"])
+
+    def test_bang_paren_shows_the_template_parameters_instead(self):
+        self.assertEqual(self._params_at("get!("), ["T"])
+
+    def test_multiple_template_parameters_stay_in_declaration_order(self):
+        self.assertEqual(self._params_at("combine!("), ["A", "B"])
+
+    def test_bang_paren_works_even_with_no_value_parameters(self):
+        # noValueParams(T)() - the value parameter list is empty, so a
+        # naive "last group" pick would find it (empty) either way; this
+        # only passes if `!` actually steers the choice, not the shape.
+        self.assertEqual(self._params_at("noValueParams!("), ["T"])
+        self.assertEqual(self._params_at("    noValueParams("), [])
