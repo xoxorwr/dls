@@ -74,8 +74,10 @@ struct SymbolStuff
 bool shouldSwapWithType(CompletionType completionType, CompletionKind kind,
 	size_t current, size_t max) pure nothrow @safe
 {
-	// packages never have types, so always return false
+	// packages (and modules, navigated the same way mid-chain) never have
+	// types, so always return false
 	if (kind == CompletionKind.packageName
+		|| kind == CompletionKind.moduleName
 		|| kind == CompletionKind.className
 		|| kind == CompletionKind.structName
 		|| kind == CompletionKind.interfaceName
@@ -109,11 +111,15 @@ istring stringToken()(auto ref const Token a)
 	return internString(a.text is null ? str(a.type) : a.text);
 }
 
-//void dumpTokens(const Token[] tokens)
-//{
-	//foreach (t; tokens)
-		//writeln(t.line, ":", t.column, " ", stringToken(t));
-//}
+/// `sym`'s `.type`, or `[]` when it has none (or points at itself). The
+/// single place every "descend into this symbol's type instead of the
+/// symbol itself" decision in `getSymbolsByTokenChain` funnels through, so
+/// there is one definition of what swapping means, not several copies that
+/// can drift apart.
+DSymbol*[] swapForType(DSymbol* sym) pure nothrow @safe
+{
+	return sym.type is null || sym.type is sym ? [] : [sym.type];
+}
 
 /**
  * Params:
@@ -125,34 +131,13 @@ istring stringToken()(auto ref const Token a)
 auto getTokensBeforeCursor(const(ubyte[]) sourceCode, size_t cursorPosition,
 	ref StringCache cache, out const(Token)[] tokenArray)
 {
-    // HACK: struct TTT{  Typ| } <- no completion unless there is a ';'.
-    // The replacement goes into a private copy: the caller's buffer is an open
-    // document (served under a `const` slice), and a completion must not leave
-    // a stray ';' in it for every later request to parse.
-    // ubyte[] modified;
-    // if (cursorPosition < sourceCode.length
-    //     && (
-    //         sourceCode[cursorPosition] == '\n'
-    //         || sourceCode[cursorPosition] == '\r'
-    //         || sourceCode[cursorPosition] == '\t'
-    //         || sourceCode[cursorPosition] == ' '
-    //     )
-    // )
-    // {
-    //     modified = sourceCode.dup;
-    //     modified[cursorPosition] = cast(ubyte) ';';
-    // }
-    // auto source = modified.length ? modified : cast(ubyte[]) sourceCode;
-    auto source = cast(ubyte[]) sourceCode;
-
-    //size_t a = cursorPosition;
-    //while(a > 0)
-    //{
-    //    if (modify[a] ==' ' || modify[a] == '\n')
-    //        break;
-    //    modify[a] = cast(ubyte) ' ';
-    //    a--;
-    //}
+	// A prior version of this patched a synthetic ';' into the source ahead
+	// of the cursor (struct TTT{ Typ| } otherwise gets no completion) by
+	// duplicating the buffer - the caller's is an open document served as a
+	// `const` slice, so a completion must never leave a stray ';' in it for
+	// later requests to parse. Left unimplemented rather than reintroduced
+	// half-finished; revisit if that gap is worth the per-request copy.
+	auto source = cast(ubyte[]) sourceCode;
 
 	LexerConfig config;
 	config.fileName = "";
@@ -634,10 +619,6 @@ private string literalTypeName(IdType type)
 DSymbol*[] getSymbolsByTokenChain(T)(Scope* completionScope,
 	T tokens, size_t cursorPosition, CompletionType completionType)
 {
-	//writeln(">>>");
-	//dumpTokens(tokens.release);
-	//writeln(">>>");
-
 	// Find the symbol corresponding to the beginning of the chain
 	DSymbol*[] symbols;
 	if (tokens.length == 0)
@@ -648,19 +629,18 @@ DSymbol*[] getSymbolsByTokenChain(T)(Scope* completionScope,
 	{
 		size_t j;
 		tokens.skipParen(j, tok!"(", tok!")");
-		if (j > 1)
-		{
-			symbols = getSymbolsByTokenChain(completionScope, tokens[1 .. j],
-				cursorPosition, completionType);
-			tokens = tokens[j + 1 .. $];
-		}
-		//writeln("<<<");
-		//dumpTokens(tokens.release);
-		//writeln("<<<");
+		// An empty or unmatched group (`()`, `(`) has nothing to chain from -
+		// falling through would otherwise look up a symbol literally named
+		// "(".
+		if (j <= 1)
+			return [];
+		symbols = getSymbolsByTokenChain(completionScope, tokens[1 .. j],
+			cursorPosition, completionType);
+		tokens = tokens[j + 1 .. $];
 		if (tokens.length == 0) // workaround (#371)
 			return [];
 	}
-	else if (tokens[0] == tok!"." && tokens.length >= 1)
+	else if (tokens[0] == tok!".")
 	{
 		if (tokens.length == 1)
 		{
@@ -705,7 +685,7 @@ DSymbol*[] getSymbolsByTokenChain(T)(Scope* completionScope,
 			{
 				if (sym.type is null)
 					return;
-				if (&sym.type.name[0] == &getBuiltinTypeName(tok!"void")[0])
+				if (sym.type.name == getBuiltinTypeName(tok!"void"))
 					voidRets++;
 				else
 				{
@@ -757,8 +737,8 @@ DSymbol*[] getSymbolsByTokenChain(T)(Scope* completionScope,
 
 	if (shouldSwapWithType(completionType, symbols[0].kind, 0, tokens.length - 1))
 	{
-		//trace("Swapping types");
-		if (symbols.length == 0 || symbols[0].type is null || symbols[0].type is symbols[0])
+		// symbols is non-empty here: the length==0 case already returned above.
+		if (symbols[0].type is null || symbols[0].type is symbols[0])
 			return [];
 		else if (symbols[0].type.kind == CompletionKind.functionName)
 		{
@@ -826,57 +806,64 @@ DSymbol*[] getSymbolsByTokenChain(T)(Scope* completionScope,
 				break loop;
 			break;
 		case tok!"identifier":
-			//trace(symbols[0].qualifier, " ", symbols[0].kind);
 			filterProperties();
 
 			if (symbols.length == 0)
 				break loop;
 
-			// Use type instead of the symbol itself for certain symbol kinds
+			immutable identText = internString(tokens[i].text);
+
+			// Use type instead of the symbol itself for certain symbol kinds.
+			// Exception: a module that already holds `identText` as a direct
+			// part - a qualified submodule import (`import pkg.sub;`
+			// alongside a plain `import pkg;`) attaches `sub` straight onto
+			// `pkg`'s own symbol - must be looked up on that symbol as-is;
+			// redirecting through `.type` sends us into the imported
+			// module's resolved scope instead, which has no member literally
+			// named after the submodule, so the lookup below would find
+			// nothing.
 			while (symbols[0].qualifier == SymbolQualifier.func
 				|| symbols[0].kind == CompletionKind.functionName
 				|| (symbols[0].kind == CompletionKind.moduleName
-					&& symbols[0].type !is null && symbols[0].type.kind == CompletionKind.importSymbol)
+					&& symbols[0].type !is null && symbols[0].type.kind == CompletionKind.importSymbol
+					&& symbols[0].getPartsByName(identText).length == 0)
 				|| symbols[0].kind == CompletionKind.importSymbol
 				|| symbols[0].kind == CompletionKind.aliasName)
 			{
-				symbols = symbols[0].type is null || symbols[0].type is symbols[0] ? [] : [symbols[0].type];
+				symbols = swapForType(symbols[0]);
 				if (symbols.length == 0)
 					break loop;
 			}
 
-			//trace("looking for ", tokens[i].text, " in ", symbols[0].name);
-			symbols = symbols[0].getPartsByName(internString(tokens[i].text));
-			//trace("symbols: ", symbols.map!(a => a.name));
+			symbols = symbols[0].getPartsByName(identText);
 			filterProperties();
 			if (symbols.length == 0)
-			{
-				//trace("Couldn't find it.");
 				break loop;
-			}
 			if (shouldSwapWithType(completionType, symbols[0].kind, i, tokens.length - 1))
 			{
-				symbols = symbols[0].type is null || symbols[0].type is symbols[0] ? [] : [symbols[0].type];
+				symbols = swapForType(symbols[0]);
 				if (symbols.length == 0)
 					break loop;
 			}
+			// As above: skip the redirect through .type when this symbol
+			// already owns the next identifier as a direct part (a chained
+			// submodule import) - there is nothing to gain by leaving its
+			// own scope, and doing so loses that part.
+			DSymbol*[] nextParts;
+			if (i + 2 < tokens.length && tokens[i + 1].type == tok!"."
+				&& tokens[i + 2].type == tok!"identifier")
+				nextParts = symbols[0].getPartsByName(internString(tokens[i + 2].text));
+
 			if ((symbols[0].kind == CompletionKind.aliasName
 				|| symbols[0].kind == CompletionKind.moduleName)
 				&& (completionType == CompletionType.identifiers
-				|| i + 1 < tokens.length))
+				|| i + 1 < tokens.length)
+				&& nextParts.length == 0)
 			{
-				symbols = symbols[0].type is null || symbols[0].type is symbols[0] ? [] : [symbols[0].type];
+				symbols = swapForType(symbols[0]);
 			}
 			if (symbols.length == 0)
 				break loop;
-			if (tokens[i].type == tok!"!")
-			{
-				i++;
-				if (tokens[i].type == tok!"(")
-					goto case;
-				else
-					i++;
-			}
 			break;
 		case tok!"(":
 			skip(tok!"(", tok!")");
@@ -890,14 +877,14 @@ DSymbol*[] getSymbolsByTokenChain(T)(Scope* completionScope,
 				skip(tok!"[", tok!"]");
 				if (!isSliceExpression(tokens, i))
 				{
-					symbols = symbols[0].type is null || symbols[0].type is symbols[0] ? [] : [symbols[0].type];
+					symbols = swapForType(symbols[0]);
 					if (symbols.length == 0)
 						break loop;
 				}
 			}
 			else if (symbols[0].qualifier == SymbolQualifier.assocArray)
 			{
-				symbols = symbols[0].type is null || symbols[0].type is symbols[0] ? [] : [symbols[0].type];
+				symbols = swapForType(symbols[0]);
 				skip(tok!"[", tok!"]");
 			}
 			else
@@ -910,7 +897,7 @@ DSymbol*[] getSymbolsByTokenChain(T)(Scope* completionScope,
 					overloads = symbols[0].getPartsByName(internString("opIndex"));
 				if (overloads.length > 0)
 				{
-					symbols = overloads[0].type is null ? [] : [overloads[0].type];
+					symbols = swapForType(overloads[0]);
 				}
 				else
 					return [];
@@ -1025,16 +1012,10 @@ bool isUdaExpression(T)(ref T tokens)
 	return result;
 }
 
-AutocompleteResponse.Completion makeSymbolCompletionInfo(const DSymbol* symbol, char kind, string file = __FILE__, int line = __LINE__)
+AutocompleteResponse.Completion makeSymbolCompletionInfo(const DSymbol* symbol, char kind)
 {
 	auto ret = AutocompleteResponse.Completion(symbol.name, kind, null,
 		symbol.symbolFile, symbol.location, symbol.doc);
-
-	import std.stdio;
-
-		//writeln(">>>>> ", symbol.name," : ", cast(CompletionKind)kind, ": ", file,":", line);
-        //writeln("      ", symbol.callTip);
-        //writeln("      ", symbol.opSlice().length);
 
 	if (symbol.type)
 	{
@@ -1057,7 +1038,7 @@ AutocompleteResponse.Completion makeSymbolCompletionInfo(const DSymbol* symbol, 
 		typeSwap(type);
 		if (type && !ret.typeOf.length)
 			ret.typeOf = type.formatType;
-    }
+	}
 
 	if ((kind == CompletionKind.variableName || kind == CompletionKind.memberVariableName) && symbol.type)
 	{
@@ -1098,14 +1079,13 @@ AutocompleteResponse.Completion makeSymbolCompletionInfo(const DSymbol* symbol, 
 
 	// TODO: extend completion with more info such as class inheritance
 
-	//warning("sym:", symbol.name, "->", ret);
 	return ret;
 }
 
 bool doUFCSSearch(string beforeToken, string lastToken) pure
 {
-    // we do the search if they are different from eachother
-    return beforeToken != lastToken;
+	// we do the search if they are different from eachother
+	return beforeToken != lastToken;
 }
 
 // Check if we are doing an index operation calltip hint
