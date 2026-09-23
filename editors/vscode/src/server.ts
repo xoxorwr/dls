@@ -3,7 +3,6 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as http from 'http';
 import * as https from 'https';
-import * as crypto from 'crypto';
 import { execFile } from 'child_process';
 
 const REPO = 'xoxorwr/dls';
@@ -29,71 +28,39 @@ function binaryName(): string {
   return process.platform === 'win32' ? 'dls.exe' : 'dls';
 }
 
-// Binaries live at a path keyed by content hash (dls-<sha256>[.exe]) rather
-// than a fixed name. A running server keeps its file open for the lifetime
-// of the process; on Windows that means the file can't be overwritten or
-// deleted while in use (POSIX allows it - the running process just keeps
-// the old inode - which is why this only ever bit Windows users). Keying by
-// hash means an update always lands at a brand-new path, so installing it
-// never touches whatever the currently-running server has open.
-function binPath(dir: string, sha: string): string {
-  const ext = process.platform === 'win32' ? '.exe' : '';
-  return path.join(dir, `dls-${sha}${ext}`);
-}
-
-// Best-effort GC of old versioned binaries. A binary still in use by a
-// running server (e.g. from another open window) can't be removed on
-// Windows; just leave it for a future call once that server has exited.
-function cleanupOldBinaries(dir: string, keepSha: string): void {
-  const keep = path.basename(binPath(dir, keepSha));
-  let entries: string[];
-  try {
-    entries = fs.readdirSync(dir);
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    if (entry === keep || !/^dls-[0-9a-f]{64}(\.exe)?$/.test(entry)) {
-      continue;
-    }
-    try {
-      fs.rmSync(path.join(dir, entry), { force: true });
-    } catch {
-      // still in use elsewhere; try again next time.
-    }
-  }
-}
-
-function sha256File(file: string): string {
-  return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
-}
-
-// Downloads + extracts `asset` into a fresh staging directory, then moves
-// the binary into its content-addressed final path and returns it.
-async function installServer(dir: string, asset: string): Promise<string> {
+// Downloads + extracts `asset` into a fresh, throwaway staging directory
+// (never directly onto `bin`) and returns the path to the extracted binary
+// there. Keeping the download/extract off the live binary means a failed or
+// partial fetch never corrupts what's currently installed.
+async function fetchToStaging(dir: string, asset: string): Promise<{ staging: string; extracted: string }> {
   const staging = fs.mkdtempSync(path.join(dir, 'tmp-'));
+  const archive = path.join(staging, asset);
+  const url = `https://github.com/${REPO}/releases/download/${TAG}/${asset}`;
+  await download(url, archive);
+  await extract(archive, staging);
+  const extracted = path.join(staging, binaryName());
+  if (process.platform !== 'win32') {
+    fs.chmodSync(extracted, 0o755);
+  }
+  return { staging, extracted };
+}
+
+// Swaps the freshly extracted binary into place. On Windows this fails with
+// EBUSY/EPERM if `bin` is still open by a running dls process (its own file,
+// or another VS Code window's) - Windows won't let you replace an in-use
+// executable, unlike POSIX where a running process just keeps its old inode.
+// Returns false (instead of throwing) for that specific case so the caller
+// can fall back to the still-installed binary and retry on a later launch.
+function installBinary(extracted: string, bin: string): boolean {
   try {
-    const archive = path.join(staging, asset);
-    const url = `https://github.com/${REPO}/releases/download/${TAG}/${asset}`;
-    await download(url, archive);
-    await extract(archive, staging);
-
-    const extracted = path.join(staging, binaryName());
-    const sha = sha256File(extracted);
-    const target = binPath(dir, sha);
-    if (!fs.existsSync(target)) {
-      if (process.platform !== 'win32') {
-        fs.chmodSync(extracted, 0o755);
-      }
-      fs.renameSync(extracted, target);
+    fs.renameSync(extracted, bin);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'EBUSY' || code === 'EPERM' || code === 'EACCES') {
+      return false;
     }
-
-    const currentFile = path.join(dir, 'dls.current');
-    fs.writeFileSync(currentFile, sha + '\n', 'utf8');
-    cleanupOldBinaries(dir, sha);
-    return target;
-  } finally {
-    fs.rmSync(staging, { recursive: true, force: true });
+    throw err;
   }
 }
 
@@ -115,46 +82,58 @@ export async function ensureServer(
   }
 
   const dir = context.globalStorageUri.fsPath;
+  const bin = path.join(dir, binaryName());
+  const stamp = path.join(dir, 'dls.sha256');
   fs.mkdirSync(dir, { recursive: true });
-
-  const currentFile = path.join(dir, 'dls.current');
-  const currentSha = fs.existsSync(currentFile)
-    ? fs.readFileSync(currentFile, 'utf8').trim()
-    : undefined;
-  const currentBin = currentSha ? binPath(dir, currentSha) : undefined;
-  const haveCurrent = !!currentBin && fs.existsSync(currentBin);
-
-  if (!config.get<boolean>('autoUpdate', true)) {
-    if (haveCurrent) {
-      return currentBin!;
-    }
-    return vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: `Downloading dls (${asset})` },
-      () => installServer(dir, asset),
-    );
-  }
+  const have = fs.existsSync(bin);
 
   // `SHA256SUMS` is a few hundred bytes; a cheap freshness check per
   // activation. Offline or rate-limited? fall back to the cached binary.
-  const expected = await fetchExpectedSha(asset).catch(() => undefined);
-  if (expected) {
-    if (haveCurrent && expected === currentSha) {
-      cleanupOldBinaries(dir, expected);
-      return currentBin!;
+  let expected: string | undefined;
+  if (config.get<boolean>('autoUpdate', true)) {
+    expected = await fetchExpectedSha(asset).catch(() => undefined);
+    if (have) {
+      if (!expected) {
+        return bin;
+      }
+      const current = fs.existsSync(stamp) ? fs.readFileSync(stamp, 'utf8').trim() : '';
+      if (current === expected) {
+        return bin;
+      }
     }
-    const target = binPath(dir, expected);
-    if (fs.existsSync(target)) {
-      fs.writeFileSync(currentFile, expected + '\n', 'utf8');
-      cleanupOldBinaries(dir, expected);
-      return target;
-    }
-  } else if (haveCurrent) {
-    return currentBin!;
+  } else if (have) {
+    return bin;
   }
 
   return vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: `Downloading dls (${asset})` },
-    () => installServer(dir, asset),
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: `Downloading dls (${asset})`,
+    },
+    async () => {
+      const { staging, extracted } = await fetchToStaging(dir, asset);
+      try {
+        const installed = installBinary(extracted, bin);
+        if (!installed) {
+          void vscode.window.showInformationMessage(
+            'dls: a new nightly build is available, but the installed server binary is ' +
+              'still in use (likely by another open window) and can\'t be replaced. It ' +
+              'will be installed automatically the next time you launch VS Code with no ' +
+              'dls server running.',
+          );
+          fs.rmSync(stamp, { force: true });
+          return bin;
+        }
+        if (expected) {
+          fs.writeFileSync(stamp, expected + '\n', 'utf8');
+        } else {
+          fs.rmSync(stamp, { force: true });
+        }
+        return bin;
+      } finally {
+        fs.rmSync(staging, { recursive: true, force: true });
+      }
+    },
   );
 }
 
