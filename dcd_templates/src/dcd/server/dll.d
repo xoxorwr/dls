@@ -327,6 +327,11 @@ struct DSemanticToken
  * Token types `dcd_semantic_tokens` reports.  The values are legend indices,
  * so the client's legend has to list these names in this order; the ones no
  * symbol maps to yet are kept anyway, so the indices stay readable.
+ *
+ * Only names are reported: keywords, literals, comments and operators are
+ * what the client's own grammar already colours, and what it cannot know is
+ * which symbol a name resolves to.  The lexical entries stay in the legend so
+ * the indices do not move.
  */
 enum DSemanticTokenType : ubyte
 {
@@ -362,47 +367,6 @@ enum DSemanticTokenModifier : ubyte
 }
 
 alias DSemanticModifiers = ubyte;
-
-/// Whether the token is a number literal (`10`, `1.5`, `2L`, ...).
-private bool isNumberLiteral(IdType type) pure nothrow @safe @nogc
-{
-    static foreach (T; NumberLiterals)
-        if (type == T)
-            return true;
-    return false;
-}
-
-/// Whether the token is a string literal (any of the three widths).
-private bool isStringLiteral(IdType type) pure nothrow @safe @nogc
-{
-    static foreach (T; StringLiterals)
-        if (type == T)
-            return true;
-    return false;
-}
-
-/// Whether a token is punctuation rather than an operator: nothing a theme
-/// wants to paint differently from the surrounding code.
-private bool isPunctuation(IdType type) pure nothrow @safe @nogc
-{
-    switch (type)
-    {
-    case tok!"(":
-    case tok!")":
-    case tok!"{":
-    case tok!"}":
-    case tok!"[":
-    case tok!"]":
-    case tok!",":
-    case tok!";":
-    case tok!":":
-    case tok!".":
-    case tok!"@":
-        return true;
-    default:
-        return false;
-    }
-}
 
 /// The token type a symbol's `CompletionKind` is shown as.
 private ubyte semanticTokenTypeOf(CompletionKind kind) pure nothrow @safe @nogc
@@ -486,52 +450,10 @@ private ubyte identifierTokenType(const(Token) token, const(Token)[] parserToken
 }
 
 /**
- * The type of one token, or `DSemanticTokenType.none` when there is nothing
- * to say about it (whitespace, or an identifier no symbol was found for, in
- * which case the client's grammar keeps colouring it).
- */
-private ubyte semanticTokenType(const(Token) token, const(Token)[] parserTokens,
-    size_t parserIndex, Scope* symbolScope, out DSemanticModifiers modifiers)
-{
-    modifiers = 0;
-
-    // Trivia and the end-of-file marker are not code: the file end would
-    // otherwise be coloured as the keyword it is spelled like.
-    if (token.type == tok!"\0" || token.type == tok!"__EOF__"
-        || token.type == tok!"whitespace" || token.type == tok!"specialTokenSequence")
-        return DSemanticTokenType.none;
-    if (token.type == tok!"comment")
-        return DSemanticTokenType.comment;
-    if (isBasicType(token.type))
-    {
-        // The builtin types are the language's own default library.
-        modifiers |= 1 << DSemanticTokenModifier.defaultLibrary;
-        return DSemanticTokenType.type;
-    }
-    if (isKeyword(token.type) || isSpecialToken(token.type))
-        return DSemanticTokenType.keyword;
-    if (isNumberLiteral(token.type))
-        return DSemanticTokenType.number;
-    if (isStringLiteral(token.type) || token.type == tok!"characterLiteral")
-        return DSemanticTokenType.string;
-    if (token.type == tok!"identifier")
-        return identifierTokenType(token, parserTokens, parserIndex, symbolScope, modifiers);
-    if (isOperator(token.type) && !isPunctuation(token.type))
-        return DSemanticTokenType.operator;
-    return DSemanticTokenType.none;
-}
-
-/// The length of a token as written: a keyword or a punctuation token carries
-/// its spelling as its type (`text` is null for those).
-private size_t tokenLength(const(Token) token) pure nothrow @safe @nogc
-{
-    return token.text is null ? str(token.type).length : token.text.length;
-}
-
-/**
- * Classifies every token of the file: what is on screen per byte range, so a
- * client can colour the parts its grammar cannot know (which name is a type,
- * which is a variable, which member of what).
+ * Classifies the names of the file: what each resolves to, so a client can
+ * colour the parts its grammar cannot know (which name is a type, which is a
+ * variable, which member of what).  A name no symbol is found for is left
+ * out, and the client's grammar keeps colouring it.
  */
 extern(C) export DSemanticToken[] dcd_semantic_tokens(const(char)* filename, const(char)* content)
 {
@@ -575,33 +497,17 @@ extern(C) export DSemanticToken[] dcd_semantic_tokens(const(char)* filename, con
     auto pair = generateAutocompleteTrees(parserTokens, &rba, source.length, cache, true);
     scope(exit) pair.destroy();
 
-    // The raw token stream of the same file: no whitespace (there is nothing
-    // to colour), and the comments kept as tokens so they get a type too.
-    LexerConfig config;
-    config.fileName = "";
-    config.whitespaceBehavior = WhitespaceBehavior.skip;
-    auto lexer = DLexer(source, config, &sc);
-
-    // `parserTokens` has no comments, so the two streams are walked in
-    // lockstep: `parserIndex` is the token the current one is, or the one it
-    // follows.
-    size_t parserIndex = 0;
-    while (!lexer.empty)
+    // Names are all this reports (see `DSemanticTokenType`), and the parser's
+    // tokens hold every one of them, so there is no second lexer pass.
+    foreach (i, token; parserTokens)
     {
-        auto token = lexer.front;
-        lexer.popFront();
-
-        while (parserIndex < parserTokens.length && parserTokens[parserIndex].index < token.index)
-            parserIndex++;
-
+        if (token.type != tok!"identifier" || token.text.length == 0)
+            continue;
         DSemanticModifiers modifiers;
-        auto type = semanticTokenType(token, parserTokens, parserIndex, pair.scope_, modifiers);
+        auto type = identifierTokenType(token, parserTokens, i, pair.scope_, modifiers);
         if (type == DSemanticTokenType.none)
             continue;
-        auto length = tokenLength(token);
-        if (length == 0)
-            continue;
-        ret ~= DSemanticToken(token.index, length, type, modifiers);
+        ret ~= DSemanticToken(token.index, token.text.length, type, modifiers);
     }
 
     return ret;

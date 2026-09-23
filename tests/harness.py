@@ -305,6 +305,39 @@ class LspClient:
         except (BrokenPipeError, ValueError) as exc:  # pragma: no cover
             raise ServerDied(f"server is gone: {exc}\n{self.stderr_tail()}") from exc
 
+    def send_batch(self, messages: list[dict[str, Any]]) -> None:
+        """Send several messages in a single write.
+
+        The server reads whatever is in the pipe at once, so the later
+        messages are already queued when it handles the first one: this is
+        how a test puts a cancel or a change *behind* a request.
+        """
+        assert self.process.stdin is not None
+        try:
+            self.process.stdin.write(b"".join(encode_message(m) for m in messages))
+            self.process.stdin.flush()
+        except (BrokenPipeError, ValueError) as exc:  # pragma: no cover
+            raise ServerDied(f"server is gone: {exc}\n{self.stderr_tail()}") from exc
+
+    def next_request_id(self) -> int:
+        """An id for a request built by hand (see ``send_batch``)."""
+        return next(self._ids)
+
+    def wait_for_response(self, request_id: int, *, timeout: float | None = None) -> dict[str, Any]:
+        """The whole response message to ``request_id`` (result or error)."""
+        deadline = time.monotonic() + (timeout if timeout is not None else self.timeout)
+        with self._condition:
+            while request_id not in self._responses:
+                if self._closed or self.process.poll() is not None:
+                    raise ServerDied(f"server is gone\n{self.stderr_tail()}")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ResponseTimeout(
+                        f"no response to request {request_id}\n{self.stderr_tail()}"
+                    )
+                self._condition.wait(remaining)
+            return self._responses.pop(request_id)
+
     def notify(self, method: str, params: Any = None) -> None:
         self.send({"jsonrpc": "2.0", "method": method, "params": params if params is not None else {}})
 

@@ -55,7 +55,8 @@ void lsp_initialize(int id, JsonNode* params_json) {
 }
 
 /**
- * Remembers whether the client can register file watchers for the server.
+ * Remembers whether the client can register file watchers for the server,
+ * and whether it takes a semantic token refresh.
  *
  * The capability is read from the initialize *params* ('capabilities' is the
  * client's ClientCapabilities there; the server's own capabilities use the
@@ -72,6 +73,10 @@ void lsp_initialize_client_capabilities(JsonNode* params_json) {
 
     g_client_supports_watchers = json_is_true(dynamic_json) != 0;
     g_client_supports_relative_patterns = json_is_true(relative_json) != 0;
+
+    auto semantic_tokens_json = json.get_object_item(workspace_json, "semanticTokens");
+    auto refresh_json = json.get_object_item(semantic_tokens_json, "refreshSupport");
+    g_client_supports_semantic_tokens_refresh = json_is_true(refresh_json) != 0;
 
     if (!g_client_supports_watchers)
         LWARN("client can't register file watchers: modules changed outside the editor are only picked up on save");

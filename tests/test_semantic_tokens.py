@@ -42,6 +42,7 @@ class SemanticTokenTests(DlsTestCase):
     PROJECT = {
         "app.d": SOURCE,
         "unopened.d": "module unopened;\n\nvoid main() {}\n",
+        "wide.d": 'module wide;\nint aaa; string s = "é😀"; int bbb = aaa;\n',
     }
     CLIENT_CAPABILITIES = {
         "textDocument": {
@@ -173,46 +174,36 @@ class SemanticTokenTests(DlsTestCase):
 
         self.assertEqual(self._token(doc, tokens, "valuea = 2")["type"], "property")
 
-    # -- the rest of the file ----------------------------------------------
+    # -- what is left to the client's grammar ------------------------------
 
-    def test_builtin_types_are_types_and_keywords_are_keywords(self):
+    def _has_token_at(self, doc, tokens, needle):
+        position = doc.position(needle, -len(needle))
+        return any((t["line"], t["character"]) == position for t in tokens)
+
+    def test_only_names_are_reported(self):
+        # Keywords, builtin types, literals, comments and operators are what
+        # the client's grammar already colours; a semantic token is only worth
+        # sending for what a grammar cannot know, which symbol a name is.
         doc = self.open_doc("app.d")
         tokens = self._tokens(doc)
 
-        self.assertEqual(self._token(doc, tokens, "int valuea")["type"], "type")
-        self.assertEqual(self._token(doc, tokens, "void main")["type"], "type")
-        self.assertEqual(self._token(doc, tokens, "return;")["type"], "keyword")
-        self.assertEqual(self._token(doc, tokens, "struct State")["type"], "keyword")
-        self.assertEqual(self._token(doc, tokens, "auto name")["type"], "keyword")
+        for needle in ("int valuea", "void main", "return;", "struct State",
+                       "auto name", "2;", '"text"', "// a comment", "/* block",
+                       "= 2"):
+            self.assertFalse(self._has_token_at(doc, tokens, needle), needle)
 
-    def test_literals_are_numbers_and_strings(self):
-        doc = self.open_doc("app.d")
+    def test_a_name_after_a_multibyte_character_is_placed_in_utf16_units(self):
+        # The columns are UTF-16 code units: 'é' is two bytes but one unit, and
+        # the emoji four bytes but two units.
+        doc = self.open_doc("wide.d")
         tokens = self._tokens(doc)
 
-        number = self._token(doc, tokens, "2;")
-        self.assertEqual(number["type"], "number")
-        self.assertEqual(number["length"], len("2"))
-
-        text = self._token(doc, tokens, '"text"')
-        self.assertEqual(text["type"], "string")
-        self.assertEqual(text["length"], len('"text"'))
-
-    def test_comments_are_comment_tokens(self):
-        doc = self.open_doc("app.d")
-        tokens = self._tokens(doc)
-
-        line_comment = self._token(doc, tokens, "// a comment")
-        self.assertEqual(line_comment["type"], "comment")
-        self.assertEqual(line_comment["length"], len("// a comment"))
-
-        # A token cannot cross a line, so a block comment is one token per
-        # line of it.
-        first = self._token(doc, tokens, "/* block")
-        second = self._token(doc, tokens, "   comment */")
-        self.assertEqual(first["type"], "comment")
-        self.assertEqual(second["type"], "comment")
-        self.assertEqual(first["length"], len("/* block"))
-        self.assertEqual(second["length"], len("   comment */"))
+        line = doc.text.split("\n")[1]
+        column = len(line[: line.rindex("aaa")].encode("utf-16-le")) // 2
+        use = [t for t in tokens if t["line"] == 1 and t["character"] == column]
+        self.assertTrue(use, repr(tokens))
+        self.assertEqual(use[0]["type"], "variable")
+        self.assertEqual(use[0]["length"], 3)
 
     def test_tokens_are_ordered_and_delta_encoded(self):
         doc = self.open_doc("app.d")

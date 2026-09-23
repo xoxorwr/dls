@@ -21,6 +21,25 @@ struct DOCUMENT_LOCATION {
 struct BUFFER {
     char* uri;
     char* content;
+
+    /// The document's semantic tokens, already encoded for LSP, and the
+    /// module cache generation they were computed against (see
+    /// 'g_module_cache_generation' in main.d).  A name's classification
+    /// depends on the text and on the modules it imports, so the tokens are
+    /// dropped whenever 'content' is replaced and ignored once the module
+    /// cache moved on.  Heap memory, owned by the buffer.
+    uint[] semantic_tokens;
+    uint semantic_tokens_modules;
+    bool semantic_tokens_valid;
+}
+
+/// Forgets the cached semantic tokens of 'buffer' (its text changed, or it is
+/// being closed).
+void drop_semantic_tokens(mem.Allocator alloc, ref BUFFER buffer) {
+    if (buffer.semantic_tokens.length > 0)
+        alloc.free(buffer.semantic_tokens);
+    buffer.semantic_tokens = null;
+    buffer.semantic_tokens_valid = false;
 }
 
 __gshared BUFFER* buffers;
@@ -143,12 +162,15 @@ BUFFER open_buffer(mem.Allocator alloc, const char * uri, const char * content) 
         auto newContent = dup_cstring(alloc, text);
         free_cstring(alloc, buffers[existing].content);
         buffers[existing].content = newContent;
+        drop_semantic_tokens(alloc, buffers[existing]);
         return buffers[existing];
     }
 
     if (first_empty_buf >= buffers_capacity && !grow_buffers(alloc))
         return BUFFER.init;
 
+    // A fresh slot: nothing of a document that sat here before may survive.
+    buffers[first_empty_buf] = BUFFER.init;
     if (content == null)
     {
         LWARN("buffer '{}' doesn't exist, reading it now", uri);
@@ -210,10 +232,14 @@ void close_buffer(mem.Allocator alloc, const char * uri) {
     }
     free_cstring(alloc, buffers[i].uri);
     free_cstring(alloc, buffers[i].content);
+    drop_semantic_tokens(alloc, buffers[i]);
     for (int j = i; j < first_empty_buf - 1; j++) {
         buffers[j] = buffers[j + 1];
     }
     --first_empty_buf;
+    // The last slot is now a copy of the entry before it, which owns that
+    // memory.
+    buffers[first_empty_buf] = BUFFER.init;
 }
 
 

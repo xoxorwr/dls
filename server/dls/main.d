@@ -22,6 +22,7 @@ import dls.definition;
 import dls.hover;
 import dls.semantic_tokens;
 import dls.folding;
+import dls.transport;
 
 __gshared:
 
@@ -65,6 +66,30 @@ bool g_client_supports_watchers = false;
 /// watcher's globPattern, which is what anchors a watcher at an import path
 /// instead of at the workspace root.
 bool g_client_supports_relative_patterns = false;
+
+/// Whether the client takes a 'workspace/semanticTokens/refresh' request
+/// (from its ClientCapabilities, see 'initialize.d').
+bool g_client_supports_semantic_tokens_refresh = false;
+
+/**
+ * Bumped whenever DCD's module cache takes a text it did not hold before.
+ *
+ * A name in one document is classified through the modules it imports, so
+ * results computed from a document's text alone (its cached semantic tokens)
+ * are only good for the generation they were computed against.
+ */
+uint g_module_cache_generation = 1;
+
+/**
+ * Records that DCD's module cache changed.  With 'notify_client', also asks
+ * the client to request the semantic tokens of its open documents again: the
+ * text a client shows has not changed, so nothing else would make it ask.
+ */
+void module_cache_changed(bool notify_client) {
+    g_module_cache_generation++;
+    if (notify_client && g_client_supports_semantic_tokens_refresh)
+        lsp_send_request(g_next_request_id++, "workspace/semanticTokens/refresh", null);
+}
 
 /**
  * The project's import paths (absolute, without a trailing separator), as
@@ -127,9 +152,12 @@ extern(C) void main(int argc, char** argv) {
     //    return;
     //}
 
+    transport_init(heap_allocator);
     while (true) {
-        auto len = parse_header();
-        auto request = parse_content(arena.allocator(), len);
+        auto message = next_message(arena.allocator());
+        if (message is null)
+            break;
+        auto request = json.parse(message);
         if (!request) {
             LERRO("unnable to parse request");
             break;
@@ -137,67 +165,6 @@ extern(C) void main(int argc, char** argv) {
         handle_request(request);
         arena.dispose();
     }
-}
-
-size_t parse_header() {
-    import core.stdc.stdio : stdin, fgetc;
-    import core.stdc.string : strncmp;
-    import core.stdc.stdlib : atoi;
-
-    size_t content_length = 0;
-    char[1024] line;
-
-    while (true) {
-        int i = 0;
-        // Read one full line
-        while (i < line.length - 1) {
-            int c = fgetc(stdin);
-            if (c == EOF) return 0;
-            line[i++] = cast(char)c;
-            if (c == '\n') break;
-        }
-        line[i] = '\0';
-
-        // Check for the empty line (\r\n or just \n)
-        // This MUST be the exit condition of the loop
-        if (line[0] == '\n' || (line[0] == '\r' && line[1] == '\n')) {
-            if (content_length > 0) return content_length;
-            continue; // Keep looking if we haven't found a length yet
-        }
-
-        // Extract Content-Length
-        if (strncmp(line.ptr, "Content-Length:", 15) == 0) {
-            char* p = line.ptr + 15;
-            while (*p && (*p < '0' || *p > '9')) p++;
-            content_length = atoi(p);
-        }
-
-        // We ignore "Content-Type" or other headers, but we MUST
-        // let the loop continue to consume them.
-    }
-}
-
-JsonNode* parse_content(mem.Allocator alloc, size_t len) {
-    if (len == 0) return null;
-
-    // Allocate len + 1 for the NUL the handlers expect.
-    char[] buffer = alloc.alloc!(char)(len + 1);
-    if (buffer.ptr == null) exit(1);
-
-    // Read exactly 'len' bytes
-    size_t read_elements = fread(buffer.ptr, 1, len, stdin);
-
-    if (read_elements != len) {
-        // If we didn't get enough bytes, the pipe is likely broken
-        return null;
-    }
-
-    buffer[len] = '\0';
-
-    // Debug: Log the first few chars to ensure it's actually JSON
-    // LINFO("JSON Start: {s}", buffer[0 .. (len > 20 ? 20 : len)]);
-
-    return json.parse(buffer[0 .. len]);
 }
 
 void handle_request(JsonNode* request) {
@@ -222,6 +189,15 @@ void handle_request(JsonNode* request) {
     auto params_json = json.get_object_item(request, "params");
 
      LINFO("request id: {} -> method: {}", id, method);
+
+    // A request the client has already given up on is not worth computing;
+    // the lifecycle requests are always answered.
+    if (id >= 0 && strcmp(method, "initialize") != 0 && strcmp(method, "shutdown") != 0
+        && cancel_queued(id)) {
+        LINFO("request {} was cancelled before it was handled", id);
+        lsp_send_error(id, REQUEST_CANCELLED, "cancelled");
+        return;
+    }
 
     // RPC
     if (strcmp(method, "initialize") == 0) {
@@ -276,6 +252,14 @@ void handle_request(JsonNode* request) {
     else if (strcmp(method, "textDocument/foldingRange") == 0) {
         lsp_folding_range(id, params_json);
     }
+    else if (strcmp(method, "$/cancelRequest") == 0) {
+        // The request it names was answered already: the ones still queued
+        // are looked for before they run ('cancel_queued').
+    }
+    else if (id < 0 && strncmp(method, "$/", 2) == 0) {
+        // Notifications under '$/' are optional for a server to understand.
+        LINFO("ignoring '{}'", method);
+    }
     else
     {
         LWARN("request '{}' not handled", method);
@@ -284,6 +268,62 @@ void handle_request(JsonNode* request) {
     }
 }
 
+
+/// JSON-RPC and LSP error codes the server answers with.
+enum REQUEST_CANCELLED = -32800;
+enum CONTENT_MODIFIED = -32801;
+
+/// 'haystack' contains 'needle'.
+bool contains(const(char)[] haystack, const(char)[] needle) {
+    if (needle.length > haystack.length)
+        return false;
+    foreach (i; 0 .. haystack.length - needle.length + 1)
+        if (haystack[i .. i + needle.length] == needle)
+            return true;
+    return false;
+}
+
+/**
+ * Whether the client has already sent a '$/cancelRequest' for 'id' that is
+ * still waiting behind the message being handled.
+ *
+ * Only the messages that spell the method are parsed, so looking is cheap
+ * next to a queued 'didChange' carrying a whole file.
+ */
+bool cancel_queued(int id) {
+    return queued_messages((const(char)[] body_) {
+        if (!contains(body_, "$/cancelRequest"))
+            return false;
+        auto message = json.parse(body_);
+        if (message == null || strcmp(json_string_item(message, "method"), "$/cancelRequest") != 0)
+            return false;
+        auto params_json = json.get_object_item(message, "params");
+        return json_int(json.get_object_item(params_json, "id"), -1) == id;
+    });
+}
+
+/**
+ * Whether a message waiting behind the one being handled replaces the text of
+ * 'uri' ('didChange') or closes it: an answer computed now would be about a
+ * text the client has already moved past.
+ */
+bool change_queued(const(char)* uri) {
+    return queued_messages((const(char)[] body_) {
+        if (!contains(body_, "textDocument/didChange") && !contains(body_, "textDocument/didClose"))
+            return false;
+        auto message = json.parse(body_);
+        if (message == null)
+            return false;
+        auto method = json_string_item(message, "method");
+        if (method == null || (strcmp(method, "textDocument/didChange") != 0
+                && strcmp(method, "textDocument/didClose") != 0))
+            return false;
+        auto text_document_json = json.get_object_item(
+            json.get_object_item(message, "params"), "textDocument");
+        auto other = json_string_item(text_document_json, "uri");
+        return other != null && strcmp(other, uri) == 0;
+    });
+}
 
 void lsp_initialize_params(int id, JsonNode* params_json)
 {
@@ -884,6 +924,9 @@ void recache_open_documents() {
         if (buffers[i].content == null) continue;
         dcd_on_open(buffers[i].uri, buffers[i].content);
     }
+    // With nothing open (the configuration applied at startup) there is
+    // nothing on screen to refresh.
+    module_cache_changed(first_empty_buf > 0);
 }
 
 /// Re-runs the configured checkers on every open document: 'check' may have
@@ -930,6 +973,9 @@ void lsp_sync_open(JsonNode* params_json) {
 
     LWARN("lsp_sync_open: {}", uri);
     dcd_on_open(uri, buffer.content);
+    // Usually the text on disk, which the modules importing this one already
+    // resolved against: no reason to have the client ask again.
+    module_cache_changed(false);
 }
 void lsp_sync_change(JsonNode* params_json) {
     auto text_document_json = json.get_object_item(params_json, "textDocument");
@@ -1001,7 +1047,12 @@ void lsp_did_save(JsonNode* params_json) {
         }
     }
 
+    // Asked before DCD takes the text: a save of the text DCD already holds
+    // changes nothing any other document resolves through.
+    immutable unchanged = dcd_content_unchanged(uri, buffer.content) != 0;
     dcd_on_save(uri, buffer.content);
+    if (!unchanged)
+        module_cache_changed(true);
 
     lsp_lint(buffer);
 }
@@ -1284,6 +1335,7 @@ void reconcile_document(const char* uri) {
             return;
 
         dcd_on_save(uri, buffer.content);
+        module_cache_changed(true);
         lsp_lint(buffer);
         return;
     }
@@ -1295,8 +1347,12 @@ void reconcile_document(const char* uri) {
     }
     scope(exit) free_cstring(heap_allocator, text);
 
+    if (dcd_content_unchanged(uri, text))
+        return;
+
     LWARN("file changed outside the editor: {}", uri);
     dcd_on_save(uri, text);
+    module_cache_changed(true);
 }
 
 
@@ -1339,8 +1395,21 @@ void lsp_send_response(int id, JsonNode* result) {
     send_message(response);
 }
 
+/// Answers request 'id' with a JSON-RPC error instead of a result.
+void lsp_send_error(int id, int code, const(char)* message) {
+    auto response = json.create_object();
+    json.add_string_to_object(response, "jsonrpc", "2.0");
+    json.add_number_to_object(response, "id", id);
+    auto error = json.add_object_to_object(response, "error");
+    json.add_number_to_object(error, "code", code);
+    json.add_string_to_object(error, "message", message);
+
+    send_message(response);
+}
+
 /**
- * Sends a request to the client ('client/registerCapability').
+ * Sends a request to the client ('client/registerCapability',
+ * 'workspace/semanticTokens/refresh').
  *
  * The reply is not tracked: 'handle_request' only logs a response, and
  * nothing in the server waits for one.  'id' must come from
@@ -1351,10 +1420,10 @@ void lsp_send_request(int id, const(char)* method, JsonNode* params) {
     json.add_string_to_object(request, "jsonrpc", "2.0");
     json.add_number_to_object(request, "id", id);
     json.add_string_to_object(request, "method", method);
+    // JSON-RPC wants 'params' to be an array or an object when it is there,
+    // so a request without any (a refresh) leaves it out.
     if (params != null)
         json.add_item_to_object(request, "params", params);
-    else
-        json.add_null_to_object(request, "params");
 
     send_message(request);
 }

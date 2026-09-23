@@ -36,6 +36,8 @@ far the most expensive part of a run.
 | `test_document_symbols.py` | outline symbols, kinds, ranges |
 | `test_signature_help.py` | overloads, parameters, active parameter |
 | `test_semantic_tokens.py` | the token legend and the tokens of a file |
+| `test_semantic_tokens_refresh.py` | tokens that depend on an imported module, `workspace/semanticTokens/refresh` |
+| `test_cancellation.py` | `$/cancelRequest`, `ContentModified` for superseded tokens, message framing |
 | `test_diagnostics.py` | the `check` command pipeline in `dls.json` |
 | `test_document_sync.py` | didOpen/didChange/didSave/didClose, open-document table |
 | `test_notification_robustness.py` | malformed, late or wrongly-typed notifications and unopened documents |
