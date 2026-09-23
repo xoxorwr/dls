@@ -43,6 +43,7 @@ void lsp_initialize(int id, JsonNode* params_json) {
     enable_semantic_tokens(capabilities);
     enable_completion(capabilities);
     enable_signature_help(capabilities);
+    enable_folding_range(capabilities);
 
     auto serverInfo = result.add_object("serverInfo")
             .add_string("name", "dls")
@@ -235,6 +236,18 @@ void enable_signature_help(JsonNode* capabilities)
     const(char)*[1] rtc = [","];
     auto retriggerCharacters = json.create_string_array(rtc.ptr, rtc.length);
     json.add_item_to_object(signatureHelp, "retriggerCharacters", retriggerCharacters);
+}
+
+/**
+ * Advertises textDocument/foldingRange.
+ *
+ * The ranges come from the server rather than the client's indentation
+ * heuristic, so folding follows D's braces and a dedented label inside a
+ * function no longer ends the block early.
+ */
+void enable_folding_range(JsonNode* capabilities)
+{
+    json.add_bool_to_object(capabilities, "foldingRangeProvider", 1);
 }
 
 /**

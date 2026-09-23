@@ -501,6 +501,11 @@ class LspClient:
             "textDocument/semanticTokens/full", {"textDocument": {"uri": uri}}
         )
 
+    def folding_range(self, uri: str) -> list[dict[str, Any]]:
+        return self.request(
+            "textDocument/foldingRange", {"textDocument": {"uri": uri}}
+        )
+
     # -- lifecycle ---------------------------------------------------------
 
     def close(self) -> None:
@@ -599,6 +604,9 @@ class Doc:
 
     def document_symbols(self):
         return self.client.document_symbols(self.uri)
+
+    def folding_range(self):
+        return self.client.folding_range(self.uri)
 
 
 class DlsTestCase(unittest.TestCase):

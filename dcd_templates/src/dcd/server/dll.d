@@ -607,6 +607,151 @@ extern(C) export DSemanticToken[] dcd_semantic_tokens(const(char)* filename, con
     return ret;
 }
 
+/**
+ * One folding range, as the zero-based line numbers a client collapses from
+ * and to.  `kind` is the LSP FoldingRangeKind ("comment") or null for a plain
+ * bracket pair: it is what makes a client show comment folds apart from code.
+ */
+struct DCFoldingRange
+{
+    size_t startLine;
+    size_t endLine;
+    const(char)* kind;
+}
+
+/// Whether a comment token is a `//` one rather than `/* */` or `/+ +/`.
+private bool isLineComment(scope const(char)[] text) pure nothrow @safe @nogc
+{
+    return text.length >= 2 && text[0] == '/' && text[1] == '/';
+}
+
+/// How many lines a token's text covers: the height of a block comment.
+private size_t countNewlines(scope const(char)[] text) pure nothrow @safe @nogc
+{
+    size_t count;
+    foreach (c; text)
+        if (c == '\n')
+            count++;
+    return count;
+}
+
+/**
+ * The block structure of a file for `textDocument/foldingRange`.
+ *
+ * The lexer decides what is structure: a bracket is only seen where DCD put
+ * one, and a string literal (`q{}`, `r"..."`, backticks), a comment or a
+ * character literal arrives as a single token, so the brackets written inside
+ * them never pass for code.
+ *
+ * A bracket whose partner has not been typed yet is left alone rather than
+ * guessed at: the file is usually being edited.
+ *
+ * Ranges come back sorted, outermost first: clients reject a list where a
+ * folded range starts before the one containing it.
+ */
+extern(C) export DCFoldingRange[] dcd_folding_ranges(const(char)* filename, const(char)* content)
+{
+    import dparse.lexer;
+    import std.algorithm : sort;
+
+    DCFoldingRange[] ret;
+    if (content is null)
+        return ret;
+    auto source = cast(ubyte[]) fromStringz(content);
+    if (source.length == 0)
+        return ret;
+
+    auto sc = StringCache(source.length.optimalBucketCount);
+
+    // Comments travel through here as their own tokens (the parser folds them
+    // into trivia instead, which is why this walks the lexer directly).
+    LexerConfig config;
+    config.fileName = "";
+    config.whitespaceBehavior = WhitespaceBehavior.skip;
+    auto lexer = DLexer(source, config, &sc);
+
+    struct OpenBracket
+    {
+        IdType type;
+        size_t line;
+    }
+    OpenBracket[] stack;
+
+    // A run of whole line `//` comments that is still going.
+    size_t runStart;
+    size_t runEnd;
+    bool runOpen;
+
+    void flushRun()
+    {
+        if (runOpen && runEnd > runStart)
+            ret ~= DCFoldingRange(runStart - 1, runEnd - 1, "comment");
+        runOpen = false;
+    }
+
+    while (!lexer.empty)
+    {
+        auto token = lexer.front;
+        lexer.popFront();
+
+        if (token.type == tok!"comment")
+        {
+            auto endLine = token.line + countNewlines(token.text);
+            if (endLine > token.line)
+            {
+                // A block comment over several lines folds on its own.
+                flushRun();
+                ret ~= DCFoldingRange(token.line - 1, endLine - 1, "comment");
+            }
+            else if (isLineComment(token.text))
+            {
+                // Consecutive `//` lines are one region.
+                if (runOpen && token.line == runEnd + 1)
+                    runEnd = token.line;
+                else
+                {
+                    flushRun();
+                    runStart = token.line;
+                    runEnd = token.line;
+                    runOpen = true;
+                }
+            }
+            else
+                flushRun();
+            continue;
+        }
+
+        auto type = token.type;
+        if (type == tok!"{" || type == tok!"(" || type == tok!"[")
+            stack ~= OpenBracket(type, token.line);
+        else if (type == tok!"}" || type == tok!")" || type == tok!"]")
+        {
+            auto want = type == tok!"}" ? tok!"{" : (type == tok!")" ? tok!"(" : tok!"[");
+
+            // A bracket left dangling above the match does not have to hide
+            // it: look down the stack and drop whatever was left unclosed.
+            size_t match = stack.length;
+            while (match > 0 && stack[match - 1].type != want)
+                match--;
+
+            if (match > 0)
+            {
+                auto open = stack[match - 1];
+                stack.length = match - 1;
+                if (token.line > open.line)
+                    ret ~= DCFoldingRange(open.line - 1, token.line - 1, null);
+            }
+        }
+    }
+    flushRun();
+
+    sort!((a, b) => a.startLine != b.startLine
+        ? a.startLine < b.startLine
+        : a.endLine > b.endLine)(ret);
+
+    return ret;
+}
+
 struct Location
 {
     string path;

@@ -168,6 +168,20 @@ struct DSemanticToken
 
 extern(C) DSemanticToken[] dcd_semantic_tokens(const(char)* filename, const(char)* content);
 
+/**
+ * A folding range: the lines a client hides when the region is collapsed.
+ * The lines are zero-based, as the protocol wants them; `kind` is null for a
+ * bracket pair and "comment" for a comment block.
+ */
+struct DCFoldingRange
+{
+    size_t startLine;
+    size_t endLine;
+    const(char)* kind;
+}
+
+extern(C) DCFoldingRange[] dcd_folding_ranges(const(char)* filename, const(char)* content);
+
 
 
 struct Location

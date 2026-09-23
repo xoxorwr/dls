@@ -21,6 +21,7 @@ import dls.document_symbols;
 import dls.definition;
 import dls.hover;
 import dls.semantic_tokens;
+import dls.folding;
 
 __gshared:
 
@@ -271,6 +272,9 @@ void handle_request(JsonNode* request) {
     }
     else if (strcmp(method, "textDocument/semanticTokens/range") == 0) {
         lsp_semantic_tokens(id, params_json, false);
+    }
+    else if (strcmp(method, "textDocument/foldingRange") == 0) {
+        lsp_folding_range(id, params_json);
     }
     else
     {
