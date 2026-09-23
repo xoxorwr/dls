@@ -120,35 +120,25 @@ its file is opened, changed or saved again.
 
 ## Known gaps encoded in the suite
 
-* `test_template_functions.TemplateReturnInstanceTests` and
-  `.TemplateArgumentInferenceTests` are `expectedFailure`s: a return type built
-  from the function's own parameter (`TD!T make(T)()` + `make!int()`) does not
-  become `TD!int` -- the call's mapping is never built -- and template arguments
-  are not inferred from a call's values (`wrap(1)`).  `T get(T)()` +
-  `get!int()`, a method of an instantiated struct, and every `TD!int` shape do
-  work.
-
-* `test_template_instantiation.NestedTemplateInstanceTests` are
-  `expectedFailure`s: an instance nested inside another instance
-  (`CTX!Rectf` with a member of type `TD!T`) keeps the *outer* parameter, so
-  `other.data` reports `TD!T` instead of `TD!Rectf`, the inner member reports
-  `T` instead of `Rectf`, and following the chain further resolves to something
-  unrelated.  The outer instantiation has to thread its mapping into the types
-  of its members.
-* (Template instantiation is otherwise covered: a `TD!int` used as a local
-  variable, a parameter, a struct field, a call result or behind `auto` all
-  report the argument's type -- see `test_template_instantiation.py`.)
-
-* `test_auto_declarations.AutoReturnTypeTests` is an `expectedFailure`: an
-  `auto` **function**'s return type is never inferred, in the same module or
-  across an import, for values or for pointers (`auto w() { return g; }` --
-  calling `w()` yields no type at all).  `first.d` records breadcrumbs for
-  `auto x = <expr>` *variables*, but not for `auto` functions.  See
-  `docs/breadcrumb-replacement.md`, where inferring it is one of the things the
-  typed path is meant to make easy.
+* `test_auto_declarations.AutoReturnTypeTests.test_auto_function_in_an_imported_module`
+  is an `expectedFailure`: an `auto` **function** whose body lives in a module
+  that is only *imported* resolves to no type at all (`auto w() { return g; }`
+  -- calling `w()` yields nothing).  The module cache parses imported modules
+  with a parser that skips every function body, which is what keeps caching
+  Phobos cheap; the same inference inside the function's own module works, so
+  only the cross-module case is pinned.  See `docs/breadcrumb-replacement.md`,
+  where inferring it is one of the things the typed path is meant to make easy.
 * (None for the buffer/cache split — that is deliberate, see below.)
 * `textDocument/definition` currently resolves variables to their type
   declaration; jumps to function definitions return an empty list.
+
+Template instantiation is otherwise covered.  A template *function* resolves
+through the arguments the call carries, named (`make!int()`) or inferred from
+the values at the site (`wrap(1)`, `wrap(widget)`, and constant expressions
+such as `wrap(2 + 3)`); a `TD!int` used as a local variable, a parameter, a
+struct field, a call result or behind `auto` reports the argument's type,
+nested and self-referential instances included -- see `test_template_functions.py`
+and `test_template_instantiation.py`.
 
 ## Deliberate behaviour pinned by tests
 

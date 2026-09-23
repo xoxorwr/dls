@@ -18,12 +18,13 @@ Working today:
   bind the function's template parameters, and the instantiated return type
   has the members of the instance it names substituted.
 
-Not working yet, pinned as `expectedFailure`: inferring the argument from a
-value (`wrap(1)`) -- the call carries no explicit argument to bind, so the
-return type stays the generic `TD!T` and the field reports `T`.
+Inferring the argument from a value (`wrap(1)`) works too: a call with no
+explicit argument binds the callee's parameters from the types of the values
+written at the call site, so it resolves to the same instance `wrap!int(1)`
+does.  A value may be a constant expression (`wrap(2 + 3)`): the operators
+fold at D's precedences and promotions, so `1 + 1.0` binds a `double` and
+`1 == 2 + 3` a `bool`.
 """
-
-import unittest
 
 from harness import DlsTestCase, find_item
 
@@ -137,6 +138,75 @@ void testme()
 }
 """
 
+INFERRED_ARGUMENT_STRUCT = """module tplfn_inferred_struct;
+
+struct TD(T)
+{
+    T data;
+}
+
+struct Widget
+{
+    int size;
+}
+
+TD!T wrap(T)(T value)
+{
+    TD!T t;
+    t.data = value;
+    return t;
+}
+
+void testme()
+{
+    Widget w;
+    wrap(w).data
+}
+"""
+
+INFERRED_ARGUMENT_STRING = """module tplfn_inferred_string;
+
+struct TD(T)
+{
+    T data;
+}
+
+TD!T wrap(T)(T value)
+{
+    TD!T t;
+    t.data = value;
+    return t;
+}
+
+void testme()
+{
+    wrap("hello").data
+}
+"""
+
+INFERRED_ARGUMENT_EXPRESSIONS = """module tplfn_inferred_expressions;
+
+struct TD(T)
+{
+    T data;
+}
+
+TD!T wrap(T)(T value)
+{
+    TD!T t;
+    t.data = value;
+    return t;
+}
+
+void testme()
+{
+    wrap(2 + 3).data;
+    wrap(1 + 1.0).data;
+    wrap(1 == 2 + 3).data;
+    wrap("a" ~ "b").data;
+}
+"""
+
 
 class TemplateFunctionTests(DlsTestCase):
     """The shapes that resolve today."""
@@ -196,18 +266,57 @@ class TemplateReturnInstanceTests(DlsTestCase):
 
 
 class TemplateArgumentInferenceTests(DlsTestCase):
-    """Known gap: no inference from argument values.
+    """The argument's type binds the parameter, with no `!` written.
 
-    `wrap(1)` has no explicit template argument, so the call resolves to the
-    generic `TD` and the field reports `T`.  DCD does not infer template
-    arguments from the values at the call site; pinned so the behaviour is
-    visible rather than surprising.
+    `wrap(1)` names no argument, so the call's own values are the only place
+    the parameter's type appears.  `resolveCallArgumentTypes` reads them off
+    the call's token chain (`wrap` `(` `1` `)`), binds them to the callee's
+    parameters in the order they are written, and instantiates it exactly as
+    `wrap!int(1)` does.  An argument written as a constant expression is
+    folded first (`wrap(2 + 3)`), through `binaryResultTypeName` -- the same
+    promotion rules the initializer walk applies to an expression's AST.
     """
 
-    PROJECT = {"tplfn_inferred.d": INFERRED_ARGUMENT}
+    PROJECT = {
+        "tplfn_inferred.d": INFERRED_ARGUMENT,
+        "tplfn_inferred_struct.d": INFERRED_ARGUMENT_STRUCT,
+        "tplfn_inferred_string.d": INFERRED_ARGUMENT_STRING,
+        "tplfn_inferred_expressions.d": INFERRED_ARGUMENT_EXPRESSIONS,
+    }
 
-    @unittest.expectedFailure
+    def described_as(self, doc, site, member):
+        items = doc.completion(site)["items"]
+        return find_item(items, member)["labelDetails"]["description"]
+
     def test_argument_is_inferred_from_the_value(self):
         doc = self.open_doc("tplfn_inferred.d")
-        items = doc.completion("wrap(1).data")["items"]
-        self.assertEqual(find_item(items, "data")["labelDetails"]["description"], "int")
+        self.assertEqual(self.described_as(doc, "wrap(1).data", "data"), "int")
+
+    def test_argument_is_inferred_from_a_variables_type(self):
+        """`wrap(w)` with `Widget w` -- the argument's *type* is the binding."""
+        doc = self.open_doc("tplfn_inferred_struct.d")
+        self.assertEqual(self.described_as(doc, "wrap(w).data", "data"), "Widget")
+
+    def test_string_literal_argument(self):
+        """`string` is an alias in `object.d`, not a builtin type symbol."""
+        doc = self.open_doc("tplfn_inferred_string.d")
+        self.assertEqual(self.described_as(doc, 'wrap("hello").data', "data"), "string")
+
+    def test_constant_expression_argument(self):
+        """`wrap(2 + 3)` -- the value's type, not just a lone literal's."""
+        doc = self.open_doc("tplfn_inferred_expressions.d")
+        self.assertEqual(self.described_as(doc, "wrap(2 + 3).data", "data"), "int")
+
+    def test_operands_are_promoted(self):
+        """`1 + 1.0` is a `double`, the common type of its operands."""
+        doc = self.open_doc("tplfn_inferred_expressions.d")
+        self.assertEqual(self.described_as(doc, "wrap(1 + 1.0).data", "data"), "double")
+
+    def test_comparison_binds_looser_than_addition(self):
+        """`1 == 2 + 3` is `1 == (2 + 3)`: a `bool`, not an `int`."""
+        doc = self.open_doc("tplfn_inferred_expressions.d")
+        self.assertEqual(self.described_as(doc, "wrap(1 == 2 + 3).data", "data"), "bool")
+
+    def test_string_concatenation_argument(self):
+        doc = self.open_doc("tplfn_inferred_expressions.d")
+        self.assertEqual(self.described_as(doc, 'wrap("a" ~ "b").data', "data"), "string")

@@ -928,46 +928,33 @@ private void resolveInitializerNode(const(BaseNode) expression, DSymbol* symbol,
 			const(ExpressionNode) rightNode, out DSymbol* result)
 		{
 			result = null;
-			with (BinaryKind) final switch (kind)
+			// Only the operands its kind actually reads are evaluated: a
+			// comparison is a `bool` whatever it compares.
+			DSymbol* leftOperand = null;
+			DSymbol* rightOperand = null;
+			final switch (kind)
 			{
-			case comparison:
-			case logical:
-				// `a == b` / `a && b`: a `bool`, whatever the operands are.
-				result = builtinType("bool");
-				return result !is null;
-			case shift:
-				// The promoted left operand: `byte << 1` is an `int`.
-				DSymbol* operand;
-				if (!evalNode(leftNode, operand))
+			case BinaryKind.comparison:
+			case BinaryKind.logical:
+				break;
+			case BinaryKind.shift:
+				if (!evalNode(leftNode, leftOperand))
 					return false;
-				typeSwap(operand, false);
-				result = builtinType(promotedScalarName(operandTypeName(operand)));
-				return result !is null;
-			case concatenation:
-				// `a ~ b` of two equal string types is that string type;
-				// `string ~ char` and arrays are not modelled.
-				DSymbol* leftString;
-				DSymbol* rightString;
-				if (!evalNode(leftNode, leftString) || !evalNode(rightNode, rightString))
-					return false;
-				typeSwap(leftString, false);
-				typeSwap(rightString, false);
-				auto name = operandTypeName(leftString);
-				if (!isStringTypeName(name) || name != operandTypeName(rightString))
-					return false;
-				result = builtinType(name);
-				return result !is null;
-			case arithmetic:
-				DSymbol* leftOperand;
-				DSymbol* rightOperand;
+				typeSwap(leftOperand, false);
+				break;
+			case BinaryKind.concatenation:
+			case BinaryKind.arithmetic:
 				if (!evalNode(leftNode, leftOperand) || !evalNode(rightNode, rightOperand))
 					return false;
 				typeSwap(leftOperand, false);
 				typeSwap(rightOperand, false);
-				result = builtinType(commonScalarName(operandTypeName(leftOperand),
-					operandTypeName(rightOperand)));
-				return result !is null;
+				break;
 			}
+			auto name = binaryResultTypeName(kind, leftOperand, rightOperand);
+			if (name is null)
+				return false;
+			result = builtinType(name);
+			return result !is null;
 		}
 
 		// `a <op> b`: dparse has one class per operator (see the casts below),
@@ -1342,8 +1329,8 @@ private bool isNullLiteral(const(ExpressionNode) n)
 }
 
 /// What a binary expression's type is made of -- see `evalBinary` in
-/// `resolveInitializerNode`.
-private enum BinaryKind : ubyte
+/// `resolveInitializerNode` and `binaryResultTypeName` below.
+public enum BinaryKind : ubyte
 {
 	/// `==`, `!=`, `<`, `<=`, `>`, `>=`, `is`, `!is`: a `bool`.
 	comparison,
@@ -1404,7 +1391,7 @@ private bool scalarTypeNamed(string name, out ScalarType type)
  * D's integral promotion of a builtin type name, or null when the name is not
  * a builtin scalar (`string`, a struct, an enum).
  */
-private string promotedScalarName(string name)
+public string promotedScalarName(string name)
 {
 	ScalarType type;
 	if (!scalarTypeNamed(name, type))
@@ -1412,6 +1399,41 @@ private string promotedScalarName(string name)
 	// Everything narrower than `int` -- including `bool` and the character
 	// types -- promotes to `int` before an operator sees it.
 	return type.rank < 3 ? "int" : name;
+}
+
+/**
+ * The type name two operands of one binary operator produce -- the single
+ * place D's promotion rules for `+`, `<<`, `==` and `~` are written.
+ *
+ * Both callers come here so that they cannot drift apart: the initializer
+ * walk, whose operands are AST nodes, and the completion path that folds the
+ * values written at a call site (`wrap(2 + 3)`), whose operands come off the
+ * token chain.
+ *
+ * Only the left operand is read for a shift (`byte << 1` is an `int`).  Null
+ * means the shape is not modelled: an operator over a user type, or a `~` of
+ * two different string types.
+ */
+public string binaryResultTypeName(BinaryKind kind, const(DSymbol)* left, const(DSymbol)* right)
+{
+	final switch (kind)
+	{
+	case BinaryKind.comparison:
+	case BinaryKind.logical:
+		// `a == b` / `a && b`: a `bool`, whatever the operands are.
+		return "bool";
+	case BinaryKind.shift:
+		return promotedScalarName(operandTypeName(left));
+	case BinaryKind.concatenation:
+		// `a ~ b` of two equal string types is that string type; `string ~
+		// char` and arrays are not modelled.
+		auto name = operandTypeName(left);
+		if (!isStringTypeName(name) || name != operandTypeName(right))
+			return null;
+		return name;
+	case BinaryKind.arithmetic:
+		return commonScalarName(operandTypeName(left), operandTypeName(right));
+	}
 }
 
 /**
@@ -2030,7 +2052,9 @@ private DSymbol* instantiateSymbol(DSymbol* s, Scope* moduleScope, ref ModuleCac
  * which case an instance built from it can have members still spelled with
  * those parameters.
  */
-private bool hasTemplateParameters(const DSymbol* symbol)
+// `public` on purpose: this file's helpers are behind a `private:` label, and
+// the completion path asks this before binding a call's arguments.
+public bool hasTemplateParameters(const DSymbol* symbol)
 {
 	if (symbol is null)
 		return false;

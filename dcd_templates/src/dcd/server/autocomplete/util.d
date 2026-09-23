@@ -33,7 +33,8 @@ import dparse.rollback_allocator;
 import dsymbol.builtin.names;
 import dsymbol.builtin.symbols;
 import dsymbol.conversion;
-import dsymbol.conversion.second : instantiateWithArguments;
+import dsymbol.conversion.second : BinaryKind, binaryResultTypeName, hasTemplateParameters,
+	instantiateWithArguments, promotedScalarName, typeSwap;
 import dsymbol.modulecache;
 import dsymbol.scope_;
 import dsymbol.string_interning;
@@ -303,6 +304,331 @@ private DSymbol* resolveTemplateArgument(T)(T tokens, Scope* completionScope,
 }
 
 /**
+ * Resolves the arguments of a call -- whose `(` is at `index` -- to the types
+ * they stand for, one symbol per argument in the order written.
+ *
+ * This is what `wrap(1)` needs: the call is the only place its parameter is
+ * named, so the argument's type (`int`) is the binding.  `false` means an
+ * argument is a shape this does not model, and the caller keeps the generic
+ * symbol rather than guessing.
+ */
+private bool resolveCallArgumentTypes(T)(T tokens, size_t index, Scope* completionScope,
+	size_t cursorPosition, out DSymbol*[] types)
+{
+	types = null;
+	if (index >= tokens.length || tokens[index].type != tok!"(")
+		return false;
+
+	size_t close = index;
+	tokens.skipParen(close, tok!"(", tok!")");
+	// A call still being typed (`wrap(1`) runs off the end of the chain
+	// instead of closing, and there is nothing yet to bind.
+	if (close >= tokens.length || tokens[close].type != tok!")")
+		return false;
+	if (close == index + 1) // `wrap()`
+		return false;
+
+	// Split the argument list on its top-level commas, ignoring the ones
+	// nested in a call or an index of an argument.
+	size_t start = index + 1;
+	size_t depth = 0;
+	for (size_t j = start; j <= close; ++j)
+	{
+		if (j < close)
+		{
+			if (tokens[j].type == tok!"(" || tokens[j].type == tok!"[")
+				++depth;
+			else if (tokens[j].type == tok!")" || tokens[j].type == tok!"]")
+				--depth;
+		}
+		if (j == close || (depth == 0 && tokens[j].type == tok!","))
+		{
+			auto argument = callArgumentType(tokens[start .. j], completionScope, cursorPosition);
+			if (argument is null)
+				return false;
+			types ~= argument;
+			start = j + 1;
+		}
+	}
+	return types.length > 0;
+}
+
+/// The type one call argument stands for, or null for a shape not modelled.
+private DSymbol* callArgumentType(T)(T tokens, Scope* completionScope, size_t cursorPosition)
+{
+	if (tokens.length == 0)
+		return null;
+
+	// A constant expression (`2 + 3`) folds to the type it produces; when it
+	// is not one, the argument has to be a name chain standing for a value.
+	auto folded = constantArgumentType(tokens, completionScope, cursorPosition);
+	return folded !is null ? folded : chainArgumentType(tokens, completionScope, cursorPosition);
+}
+
+/// The type a chain-shaped argument stands for (`widget`, `a.b!c(x).d`), or
+/// null when it is not a name chain at all.
+private DSymbol* chainArgumentType(T)(T tokens, Scope* completionScope, size_t cursorPosition)
+{
+	if (tokens.length == 0)
+		return null;
+
+	// A lone literal is worth the builtin type of the same name: `1` is an
+	// `int`, `1.0` a `double`, `"x"` a `string`.
+	if (tokens.length == 1)
+	{
+		auto typeName = literalTypeName(tokens[0].type);
+		if (typeName !is null)
+			return typeNamed(typeName, completionScope, cursorPosition);
+	}
+
+	// The chain's symbol is swapped for the type it stands for.
+	auto symbols = getSymbolsByTokenChain(completionScope, getExpression(tokens),
+		cursorPosition, CompletionType.identifiers);
+	if (symbols.length == 0)
+		return null;
+	auto symbol = symbols[0];
+	if (symbol is null)
+		return null;
+	typeSwap(symbol);
+	return symbol;
+}
+
+/**
+ * Folds a constant expression written in an argument -- `2 + 3`, `1 << 0`,
+ * `(a) * b`, `-x` -- to the type it produces, or returns null for a shape this
+ * does not model.
+ *
+ * The operators are D's and bind the way D's do, so `1 == 2 + 3` is a `bool`
+ * and `1 + 2L` a `long`; the types themselves come from
+ * `binaryResultTypeName`, the same rule the initializer walk applies to an
+ * expression's tree, so an argument and an `auto x = <expr>` cannot disagree.
+ */
+private DSymbol* constantArgumentType(T)(T tokens, Scope* completionScope, size_t cursorPosition)
+{
+	size_t index = 0;
+	auto type = binaryExpressionType(tokens, index, tokens.length, 0,
+		completionScope, cursorPosition);
+	// A token left over is a shape the fold does not model (a cast, a
+	// ternary, a call whose result it could not follow).
+	if (type is null || index != tokens.length)
+		return null;
+	return type;
+}
+
+/// One binary expression, with `index` left on the first token after it.
+private DSymbol* binaryExpressionType(T)(T tokens, ref size_t index, size_t end,
+	int minPrecedence, Scope* completionScope, size_t cursorPosition)
+{
+	auto left = operandType(tokens, index, end, completionScope, cursorPosition);
+	if (left is null)
+		return null;
+
+	while (index < end)
+	{
+		OperatorInfo op;
+		if (!operatorInfo(tokens[index].type, op) || op.precedence < minPrecedence)
+			break;
+
+		index++;
+		// Left associative: the right side takes only the operators binding
+		// strictly tighter, so `a - b - c` folds as `(a - b) - c`.
+		auto right = binaryExpressionType(tokens, index, end, op.precedence + 1,
+			completionScope, cursorPosition);
+		if (right is null)
+			return null;
+
+		auto name = binaryResultTypeName(op.kind, left, right);
+		if (name is null)
+			return null;
+		left = typeNamed(name, completionScope, cursorPosition);
+		if (left is null)
+			return null;
+	}
+	return left;
+}
+
+/// One operand: a prefix, a parenthesised group, a literal or a name chain.
+private DSymbol* operandType(T)(T tokens, ref size_t index, size_t end,
+	Scope* completionScope, size_t cursorPosition)
+{
+	if (index >= end)
+		return null;
+
+	// The prefixes that keep the operand's own scalar type (`-x`, `~x`) or
+	// turn it into a `bool` (`!x`).
+	switch (tokens[index].type)
+	{
+	case tok!"-":
+	case tok!"+":
+	case tok!"~":
+		index++;
+		auto operand = operandType(tokens, index, end, completionScope, cursorPosition);
+		if (operand is null)
+			return null;
+		auto promoted = promotedScalarName(operand.name.data);
+		return promoted is null ? null : typeNamed(promoted, completionScope, cursorPosition);
+	case tok!"!":
+		index++;
+		if (operandType(tokens, index, end, completionScope, cursorPosition) is null)
+			return null;
+		return typeNamed("bool", completionScope, cursorPosition);
+	default:
+		break;
+	}
+
+	// `(2 + 3)`: a group is an expression of its own.
+	if (tokens[index].type == tok!"(")
+	{
+		auto close = matchingParen(tokens, index, end);
+		if (close >= end)
+			return null;
+		auto inner = constantArgumentType(tokens[index + 1 .. close],
+			completionScope, cursorPosition);
+		if (inner is null)
+			return null;
+		index = close + 1;
+		return inner;
+	}
+
+	// A literal is worth the builtin type of the same name.
+	auto literal = literalTypeName(tokens[index].type);
+	if (literal !is null)
+	{
+		index++;
+		return typeNamed(literal, completionScope, cursorPosition);
+	}
+
+	// The rest is a name chain (`widget`, `a.b!c(x).d`) running up to the next
+	// operator: it is the chain walk that knows what a call returns.
+	auto stop = nextOperator(tokens, index, end);
+	auto chain = chainArgumentType(tokens[index .. stop], completionScope, cursorPosition);
+	if (chain is null)
+		return null;
+	index = stop;
+	return chain;
+}
+
+/// The `)` matching the `(` at `index`, or `end` when the group never closes.
+private size_t matchingParen(T)(T tokens, size_t index, size_t end)
+{
+	auto slice = tokens[index .. end];
+	size_t local = 0;
+	slice.skipParen(local, tok!"(", tok!")");
+	if (local >= slice.length || slice[local].type != tok!")")
+		return end;
+	return index + local;
+}
+
+/// The first token at or after `index` that is an operator no group encloses:
+/// where the chain an operand is made of has to stop.
+private size_t nextOperator(T)(T tokens, size_t index, size_t end)
+{
+	size_t depth = 0;
+	for (size_t i = index; i < end; i++)
+	{
+		auto type = tokens[i].type;
+		if (type == tok!"(" || type == tok!"[" || type == tok!"{")
+			depth++;
+		else if (type == tok!")" || type == tok!"]" || type == tok!"}")
+		{
+			if (depth == 0)
+				return i;
+			depth--;
+		}
+		else if (depth == 0)
+		{
+			OperatorInfo ignored;
+			if (operatorInfo(type, ignored))
+				return i;
+		}
+	}
+	return end;
+}
+
+/// A binary operator: what its result is made of, and how tightly it binds.
+private struct OperatorInfo
+{
+	BinaryKind kind;
+	int precedence;
+}
+
+/**
+ * Whether a token is an operator the constant fold knows, and how it binds.
+ *
+ * The precedences are D's, lowest first, so a comparison sits below `+` and
+ * `1 == 2 + 3` compares a `bool` against nothing rather than adding to one.
+ */
+private bool operatorInfo(IdType type, out OperatorInfo info)
+{
+	switch (type)
+	{
+	case tok!"^^": info = OperatorInfo(BinaryKind.arithmetic, 10); return true;
+	case tok!"*":
+	case tok!"/":
+	case tok!"%": info = OperatorInfo(BinaryKind.arithmetic, 9); return true;
+	case tok!"+":
+	case tok!"-": info = OperatorInfo(BinaryKind.arithmetic, 8); return true;
+	case tok!"~": info = OperatorInfo(BinaryKind.concatenation, 8); return true;
+	case tok!"<<":
+	case tok!">>":
+	case tok!">>>": info = OperatorInfo(BinaryKind.shift, 7); return true;
+	case tok!"&": info = OperatorInfo(BinaryKind.arithmetic, 6); return true;
+	case tok!"^": info = OperatorInfo(BinaryKind.arithmetic, 5); return true;
+	case tok!"|": info = OperatorInfo(BinaryKind.arithmetic, 4); return true;
+	case tok!"==":
+	case tok!"!=":
+	case tok!"is": info = OperatorInfo(BinaryKind.comparison, 3); return true;
+	case tok!"<":
+	case tok!">":
+	case tok!"<=":
+	case tok!">=": info = OperatorInfo(BinaryKind.comparison, 2); return true;
+	case tok!"&&": info = OperatorInfo(BinaryKind.logical, 1); return true;
+	case tok!"||": info = OperatorInfo(BinaryKind.logical, 0); return true;
+	default: return false;
+	}
+}
+
+/**
+ * The symbol a builtin type name stands for: the scalar types are in the
+ * builtin table, while `string`, `wstring`, `dstring` and the like are aliases
+ * declared in `object.d` and only reachable through the scope.
+ */
+private DSymbol* typeNamed(string name, Scope* completionScope, size_t cursorPosition)
+{
+	auto interned = internString(name);
+	foreach (candidate; builtinSymbols[])
+		if (candidate.name == interned)
+			return cast(DSymbol*) candidate;
+	auto found = completionScope.getSymbolsByNameAndCursor(interned, cursorPosition);
+	return found.length > 0 ? found[0] : null;
+}
+
+/// The builtin type a literal token stands for, or null when it is not one.
+private string literalTypeName(IdType type)
+{
+	switch (type)
+	{
+	case tok!"intLiteral": return "int";
+	case tok!"uintLiteral": return "uint";
+	case tok!"longLiteral": return "long";
+	case tok!"ulongLiteral": return "ulong";
+	case tok!"floatLiteral": return "float";
+	case tok!"doubleLiteral": return "double";
+	case tok!"realLiteral": return "real";
+	case tok!"ifloatLiteral": return "ifloat";
+	case tok!"idoubleLiteral": return "idouble";
+	case tok!"irealLiteral": return "ireal";
+	case tok!"characterLiteral": return "char";
+	case tok!"stringLiteral": return "string";
+	case tok!"wstringLiteral": return "wstring";
+	case tok!"dstringLiteral": return "dstring";
+	case tok!"true":
+	case tok!"false": return "bool";
+	default: return null;
+	}
+}
+
+/**
  *
  */
 DSymbol*[] getSymbolsByTokenChain(T)(Scope* completionScope,
@@ -411,6 +737,21 @@ DSymbol*[] getSymbolsByTokenChain(T)(Scope* completionScope,
 			if (instantiated !is null)
 				symbols = [instantiated];
 			start = end + 1;
+		}
+	}
+	// A call with no explicit argument -- `wrap(1)`.  What is written at the
+	// call site binds the callee's parameters just as `wrap!int(1)` does, so
+	// the chain goes on as a concrete instance (`TD!int`) instead of the
+	// generic symbol (`TD!T`), which is what `wrap(1).data` completes against.
+	else if (symbols.length > 0 && tokens.length > 1 && tokens[1].type == tok!"("
+		&& hasTemplateParameters(symbols[0]))
+	{
+		DSymbol*[] argumentTypes;
+		if (resolveCallArgumentTypes(tokens, 1, completionScope, cursorPosition, argumentTypes))
+		{
+			auto instantiated = instantiateWithArguments(symbols[0], argumentTypes);
+			if (instantiated !is null)
+				symbols = [instantiated];
 		}
 	}
 
