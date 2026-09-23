@@ -1403,6 +1403,18 @@ private:
 					case tok!"in":
 						parameter.acSymbol.parameterIsIn = true;
 						break;
+					case tok!"const":
+						parameter.acSymbol.parameterIsConst = true;
+						break;
+					case tok!"immutable":
+						parameter.acSymbol.parameterIsImmutable = true;
+						break;
+					case tok!"shared":
+						parameter.acSymbol.parameterIsShared = true;
+						break;
+					case tok!"inout":
+						parameter.acSymbol.parameterIsInout = true;
+						break;
 					default:
 						break;
 					}

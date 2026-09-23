@@ -1012,6 +1012,42 @@ bool isUdaExpression(T)(ref T tokens)
 	return result;
 }
 
+/// The storage classes a parameter symbol was declared with -- including a
+/// bare `const`/`immutable`/`shared`/`inout` (`const int x`), which is a
+/// parameter attribute distinct from the same words written as a type
+/// constructor (`const(int) x`, part of the type instead; see
+/// `parameterIsConst`'s doc in `symbol.d`) -- space-terminated so the result
+/// can be prepended straight onto a formatted type. Empty for anything that
+/// isn't a parameter: a plain local variable never sets these flags.
+string parameterStorageClassPrefix(const DSymbol* symbol)
+{
+	string prefix;
+	if (symbol.parameterIsShared)
+		prefix ~= "shared ";
+	// Mutually exclusive in the grammar (`parseParameterAttribute` is a
+	// `switch`, one token consumed at a time, but D itself never allows
+	// combining these on one parameter either).
+	if (symbol.parameterIsImmutable)
+		prefix ~= "immutable ";
+	else if (symbol.parameterIsConst)
+		prefix ~= "const ";
+	else if (symbol.parameterIsInout)
+		prefix ~= "inout ";
+	if (symbol.parameterIsScope)
+		prefix ~= "scope ";
+	if (symbol.parameterIsReturn)
+		prefix ~= "return ";
+	if (symbol.parameterIsOut)
+		prefix ~= "out ";
+	else if (symbol.parameterIsAutoRef)
+		prefix ~= "auto ref ";
+	else if (symbol.parameterIsRef)
+		prefix ~= "ref ";
+	if (symbol.parameterIsLazy)
+		prefix ~= "lazy ";
+	return prefix;
+}
+
 AutocompleteResponse.Completion makeSymbolCompletionInfo(const DSymbol* symbol, char kind)
 {
 	auto ret = AutocompleteResponse.Completion(symbol.name, kind, null,
@@ -1038,6 +1074,9 @@ AutocompleteResponse.Completion makeSymbolCompletionInfo(const DSymbol* symbol, 
 		typeSwap(type);
 		if (type && !ret.typeOf.length)
 			ret.typeOf = type.formatType;
+
+		if (ret.typeOf.length)
+			ret.typeOf = parameterStorageClassPrefix(symbol) ~ ret.typeOf;
 	}
 
 	if ((kind == CompletionKind.variableName || kind == CompletionKind.memberVariableName) && symbol.type)

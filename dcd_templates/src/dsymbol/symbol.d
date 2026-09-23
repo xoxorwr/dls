@@ -510,6 +510,20 @@ struct DSymbol
         bool parameterIsOut: 1;
         bool parameterIsIn: 1;
 
+        // `const int x` / `immutable int x` / ... written bare, as a
+        // parameter *attribute* -- distinct from `const(int) x`, which is a
+        // type constructor parsed into `Parameter.type` instead and never
+        // reaches here (see `parseParameterAttribute`'s `peekIs(tok!"(")`
+        // check). Only the bare form needs a flag: the type-constructor form
+        // already shows up through the type itself wherever a type is
+        // rendered from `formatNode` (a raw AST walk, e.g. a function's
+        // `callTip`) -- it is only invisible in the *resolved* type graph
+        // (`DSymbol.type`), which never tracked qualifiers to begin with.
+        bool parameterIsConst: 1;
+        bool parameterIsImmutable: 1;
+        bool parameterIsShared: 1;
+        bool parameterIsInout: 1;
+
 	/**
 	 * True while `instantiateSymbol` rebuilds this instance.  A template that
 	 * mentions itself (`Node!T next;`) would otherwise rebuild forever: the

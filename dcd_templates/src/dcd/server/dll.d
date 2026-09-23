@@ -1318,11 +1318,12 @@ extern(C) export string[] dcd_hover(const(char)* filename, const(char)* content,
                             }
                         }
                         
+                        string storagePrefix = parameterStorageClassPrefix(sym);
                         if (typeName.length > 0){
-                            value ~= typeName ~ " " ~ sym.name ~ ";";
+                            value ~= storagePrefix ~ typeName ~ " " ~ sym.name ~ ";";
                         }
                         else{
-                            value ~= sym.type.formatType() ~ " " ~ sym.name ~ ";";
+                            value ~= storagePrefix ~ sym.type.formatType() ~ " " ~ sym.name ~ ";";
 
 
                         }

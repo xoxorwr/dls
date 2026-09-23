@@ -1005,6 +1005,69 @@ private void resolveInitializerNode(const(BaseNode) expression, DSymbol* symbol,
 		if (evalBinary(e, value))
 			return true;
 
+		// Positional IFTI: for each of `callee`'s parameters whose declared
+		// type resolves, once any array/pointer/assoc-array wrapping is
+		// peeled off both sides in lockstep, to one of the callee's own
+		// `typeTmpParam` children (`T data` inside `T get(T)(T data)`, or
+		// `T[] arr` inside `T first(T)(T[] arr)`), the type the argument
+		// written at that position has under the same wrapping is what the
+		// parameter stands for. A parameter built out of a template
+		// parameter some other way (`const(T)`) is left unresolved, same as
+		// an argument whose own type could not be evaluated, or one wrapped
+		// differently than the parameter (`first(3)` against `T[]`).
+		DSymbol*[string] deduceTemplateArguments(DSymbol* callee, const Arguments arguments)
+		{
+			DSymbol*[string] deduced;
+			if (callee is null || arguments is null || arguments.namedArgumentList is null)
+				return deduced;
+			auto args = arguments.namedArgumentList.items;
+			auto params = callee.functionParameters;
+			foreach (i, param; params)
+			{
+				if (param is null || param.type is null)
+					continue;
+				if (i >= args.length || args[i] is null || args[i].assignExpression is null)
+					continue;
+				DSymbol* argType;
+				if (!evalNode(args[i].assignExpression, argType) || argType is null)
+					continue;
+				// `false`: keep an alias (`string`) as itself, the same way
+				// `evalBinaryResult` does -- otherwise `wrap("hi")` would
+				// deduce `T` as `char[]`, `string`'s aliased-to type, not
+				// `string` itself.
+				typeSwap(argType, false);
+
+				DSymbol* paramType = param.type;
+				while (paramType !is null && argType !is null
+					&& paramType.kind == CompletionKind.dummy)
+				{
+					// An array literal (`[1, 2, 3]`) is marked
+					// `ARRAY_LITERAL_SYMBOL_NAME`, not the `ARRAY_SYMBOL_NAME`
+					// a declared `T[]` parameter wraps with -- same shape,
+					// different marker, so `T[] arr` deduces against a
+					// literal argument too, not only a variable already of
+					// array type.
+					bool matches = paramType.name == ARRAY_SYMBOL_NAME
+						? (argType.name == ARRAY_SYMBOL_NAME
+							|| argType.name == ARRAY_LITERAL_SYMBOL_NAME)
+						: paramType.name == argType.name
+							&& (paramType.name == POINTER_SYMBOL_NAME
+								|| paramType.name == ASSOC_ARRAY_SYMBOL_NAME);
+					if (!matches)
+						break;
+					paramType = paramType.type;
+					argType = argType.type;
+				}
+				if (paramType is null || argType is null
+					|| paramType.kind != CompletionKind.typeTmpParam)
+					continue;
+				if (paramType.name in deduced)
+					continue;
+				deduced[paramType.name] = argType;
+			}
+			return deduced;
+		}
+
 		if (auto unary = cast(const(UnaryExpression)) e)
 		{
 			// `a.b` / `a.b!(int)`: a member of what is on the left.
@@ -1048,7 +1111,20 @@ private void resolveInitializerNode(const(BaseNode) expression, DSymbol* symbol,
 					return false;
 				value = callee;
 				if (value !is null)
+				{
+					// IFTI (`get(Data())` calling `T get(T)(T data)`, no
+					// explicit `!(...)`): deduce what each of the callee's
+					// type parameters stands for from the arguments actually
+					// written, positionally, before resolving what it
+					// returns -- otherwise the return type is left as the
+					// parameter symbol itself (`T`), not the argument's type
+					// (`Data`).
+					auto deduced = deduceTemplateArguments(callee,
+						unary.functionCallExpression.arguments);
 					typeSwap(value);
+					if (deduced.length > 0)
+						value = instantiateSymbol(value, moduleScope, cache, deduced);
+				}
 				return true;
 			}
 			// `a[i]`: one step down per index that is not a slice.
