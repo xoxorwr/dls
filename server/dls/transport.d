@@ -16,6 +16,10 @@ import core.stdc.stdlib : atoi;
  * client cancelled, or one about a text a queued change has replaced, is not
  * worth computing.  Nothing is consumed by looking; 'next_message' hands the
  * messages out in order.
+ *
+ * 'next_message' also takes a wait timeout, so the caller can come back with
+ * nothing when idle: that is how the debounced diagnostics pass is timed,
+ * without a second thread.
  */
 
 __gshared private {
@@ -34,10 +38,17 @@ void transport_init(mem.Allocator alloc) {
 }
 
 /**
- * The body of the next message, copied into 'alloc' and null terminated, or
- * null once the input ended before a whole message.  Waits for the client.
+ * The body of the next message, copied into 'alloc' and null terminated.
+ * Waits up to 'timeout_ms' for a whole message to arrive ('-1' blocks
+ * forever, as every caller but the idle wait below wants; '0' returns
+ * immediately with whatever is already buffered).
+ *
+ * Returns null either way when there is no message: 'timed_out' is set when
+ * the wait elapsed with nothing complete yet (the caller has idle work to do
+ * and should ask again later), and left false when standard input itself
+ * ended - the caller's cue to stop.
  */
-char[] next_message(mem.Allocator alloc) {
+char[] next_message(mem.Allocator alloc, int timeout_ms, out bool timed_out) {
     while (true) {
         size_t body_start, body_length;
         if (frame_at(g_start, body_start, body_length)) {
@@ -53,8 +64,15 @@ char[] next_message(mem.Allocator alloc) {
                 g_start = g_end = 0;
             return body_[0 .. body_length];
         }
-        if (!read_input(true))
+        final switch (read_input(timeout_ms)) {
+        case ReadResult.data:
+            continue; // more may now be enough to complete the frame above
+        case ReadResult.eof:
             return null;
+        case ReadResult.timeout:
+            timed_out = true;
+            return null;
+        }
     }
 }
 
@@ -70,7 +88,7 @@ bool queued_messages(scope bool delegate(const(char)[] body_) visit) {
     // Whatever has arrived since the last read; bounded, so a client that
     // keeps writing cannot keep the answer from going out.
     foreach (_; 0 .. 64)
-        if (!read_input(false))
+        if (read_input(0) != ReadResult.data)
             break;
 
     size_t at = g_start;
@@ -131,28 +149,31 @@ private bool frame_at(size_t at, out size_t body_start, out size_t body_length) 
     }
 }
 
+enum ReadResult { data, eof, timeout }
+
 /**
- * Appends what standard input has to the buffer.  With 'wait', blocks until
- * something arrives; without, only reads what is already there.  Returns
- * whether anything was read.
+ * Appends what standard input has to the buffer, waiting up to 'timeout_ms'
+ * ('-1' forever, '0' not at all - only what is already there) for something
+ * to read.
  */
-private bool read_input(bool wait) {
+private ReadResult read_input(int timeout_ms) {
     if (g_eof)
-        return false;
-    if (!wait && !input_ready())
-        return false;
+        return ReadResult.eof;
 
     enum CHUNK = 64 * 1024;
     if (!reserve(CHUNK))
-        return false;
+        return ReadResult.eof; // out of memory: stop rather than spin on it
+
+    if (!wait_for_input(timeout_ms))
+        return ReadResult.timeout;
 
     auto count = read_stdin(g_input.ptr + g_end, g_input.length - g_end);
     if (count <= 0) {
         g_eof = true;
-        return false;
+        return ReadResult.eof;
     }
     g_end += count;
-    return true;
+    return ReadResult.data;
 }
 
 /// Room for 'extra' bytes past 'g_end': the consumed front is reclaimed
@@ -186,17 +207,41 @@ private bool reserve(size_t extra) {
 }
 
 version (Windows) {
-    import core.sys.windows.windows : GetStdHandle, ReadFile, PeekNamedPipe,
+    import core.sys.windows.windows : GetStdHandle, ReadFile, PeekNamedPipe, Sleep,
         STD_INPUT_HANDLE, DWORD, HANDLE;
 
-    /// Whether reading would not block.  Only a pipe can be asked that - an
-    /// editor always starts the server on one; anything else never looks
-    /// ahead, which only costs the chance to skip work.
-    private bool input_ready() {
-        DWORD available;
-        if (!PeekNamedPipe(GetStdHandle(STD_INPUT_HANDLE), null, 0, null, &available, null))
-            return false;
-        return available > 0;
+    /**
+     * Waits up to 'timeout_ms' for stdin to have something to read; false
+     * only on a timeout.
+     *
+     * 'timeout_ms < 0' (no debounce deadline pending - most requests, most
+     * of the time) is the plain blocking 'ReadFile' this server always
+     * used, with no polling in front of it - the well-exercised path.
+     * Only a real bound ('timeout_ms >= 0', a debounce actually pending)
+     * takes the newer, less-proven route: a pipe has no real
+     * wait-with-timeout in synchronous mode on Windows
+     * ('WaitForSingleObject' is not reliably signalled by pipe data), so
+     * this polls 'PeekNamedPipe' in short steps, the standard workaround -
+     * it costs a little wakeup churn, and is scoped to only the case that
+     * actually needs a bound, keeping the common case on the old path.
+     */
+    private bool wait_for_input(int timeout_ms) {
+        if (timeout_ms < 0)
+            return true; // read_stdin's own ReadFile blocks until data arrives
+
+        enum STEP_MS = 15;
+        int waited = 0;
+        while (true) {
+            DWORD available;
+            if (!PeekNamedPipe(GetStdHandle(STD_INPUT_HANDLE), null, 0, null, &available, null))
+                return true; // a broken pipe is surfaced by the ReadFile that follows
+            if (available > 0)
+                return true;
+            if (waited >= timeout_ms)
+                return false;
+            Sleep(STEP_MS);
+            waited += STEP_MS;
+        }
     }
 
     private ptrdiff_t read_stdin(char* buffer, size_t length) {
@@ -210,9 +255,19 @@ version (Windows) {
     import core.sys.posix.unistd : read;
     import core.stdc.errno : errno, EINTR;
 
-    private bool input_ready() {
+    /// Waits up to 'timeout_ms' ('-1' forever) for stdin to have something to
+    /// read or hang up; false only on a timeout.
+    private bool wait_for_input(int timeout_ms) {
         pollfd fd = { fd: 0, events: POLLIN };
-        return poll(&fd, 1, 0) > 0 && (fd.revents & (POLLIN | POLLHUP)) != 0;
+        while (true) {
+            auto ready = poll(&fd, 1, timeout_ms);
+            if (ready < 0) {
+                if (errno == EINTR)
+                    continue;
+                return true; // surfaced by the read() that follows instead
+            }
+            return ready > 0 && (fd.revents & (POLLIN | POLLHUP)) != 0;
+        }
     }
 
     private ptrdiff_t read_stdin(char* buffer, size_t length) {

@@ -1810,7 +1810,9 @@ void foldStringInitializer(const Initializer init, DSymbol* symbol)
 	symbol.constantValue = internString(t.text[1 .. $ - 1]);
 }
 
-static istring convertChainToImportPath(const IdentifierChain ic)
+/// Public: also used from `dcd.server.dll` to resolve an import's module
+/// path outside a `FirstPass` run (unused-import detection).
+public static istring convertChainToImportPath(const IdentifierChain ic)
 {
 	import std.path : dirSeparator;
 	auto app = appender!string();

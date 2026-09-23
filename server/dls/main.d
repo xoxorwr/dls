@@ -6,6 +6,7 @@ import args = rt.args;
 import mem = rt.memz;
 import fs = rt.filesystem;
 import rt.json;
+import time = rt.time;
 
 import core.stdc.stdio;
 import core.stdc.stdlib;
@@ -22,6 +23,8 @@ import dls.definition;
 import dls.hover;
 import dls.semantic_tokens;
 import dls.folding;
+import dls.unused_diagnostics;
+import dls.code_action;
 import dls.transport;
 
 __gshared:
@@ -91,6 +94,17 @@ void module_cache_changed(bool notify_client) {
         lsp_send_request(g_next_request_id++, "workspace/semanticTokens/refresh", null);
 }
 
+/// How long a 'didChange' waits with nothing further arriving before its
+/// document is linted ('dls.json's "debounceMs", read in 'apply_dls_json' -
+/// the VS Code extension already writes this key, matching its own
+/// "Diagnostics idle delay" setting).  A save or an external write is not a
+/// per-keystroke event and is linted immediately regardless of this.
+int g_debounce_ms = 500;
+
+/// Whether the built-in unused-import/unused-parameter check runs at all
+/// ('dls.json's "unusedDiagnostics", default on).
+bool g_unused_diagnostics_enabled = true;
+
 /**
  * The project's import paths (absolute, without a trailing separator), as
  * registered with DCD.  They outlive the initialize request because the file
@@ -154,9 +168,25 @@ extern(C) void main(int argc, char** argv) {
 
     transport_init(heap_allocator);
     while (true) {
-        auto message = next_message(arena.allocator());
+        // Block until the client sends something, or - if a document's
+        // debounce window is running - until that elapses instead, so the
+        // deferred lint pass runs without a second thread.
+        int timeout_ms = -1;
+        auto due = soonest_lint_due();
+        if (due >= 0) {
+            auto now = time.get_time();
+            timeout_ms = due > now ? cast(int)(due - now) : 0;
+        }
+
+        bool timed_out;
+        auto message = next_message(arena.allocator(), timeout_ms, timed_out);
+        if (timed_out) {
+            run_due_lints();
+            arena.dispose();
+            continue;
+        }
         if (message is null)
-            break;
+            break; // real EOF: the client is gone
         auto request = json.parse(message);
         if (!request) {
             LERRO("unnable to parse request");
@@ -164,6 +194,30 @@ extern(C) void main(int argc, char** argv) {
         }
         handle_request(request);
         arena.dispose();
+    }
+}
+
+/// The earliest 'lint_due_at_ms' among buffers with a pending debounce, or
+/// -1 when none are pending (the main loop then waits for the client alone).
+long soonest_lint_due() {
+    long earliest = -1;
+    foreach (i; 0 .. first_empty_buf) {
+        if (!buffers[i].lint_pending) continue;
+        if (earliest < 0 || buffers[i].lint_due_at_ms < earliest)
+            earliest = buffers[i].lint_due_at_ms;
+    }
+    return earliest;
+}
+
+/// Runs the diagnostics dispatcher for every buffer whose debounce window has
+/// elapsed.  'lsp_lint' clears each buffer's own 'lint_pending' as it runs,
+/// so a buffer not yet due is left untouched and the main loop comes back for
+/// it once its own deadline arrives.
+void run_due_lints() {
+    auto now = time.get_time();
+    foreach (i; 0 .. first_empty_buf) {
+        if (buffers[i].lint_pending && buffers[i].lint_due_at_ms <= now)
+            lsp_lint(buffers[i]);
     }
 }
 
@@ -251,6 +305,9 @@ void handle_request(JsonNode* request) {
     }
     else if (strcmp(method, "textDocument/foldingRange") == 0) {
         lsp_folding_range(id, params_json);
+    }
+    else if (strcmp(method, "textDocument/codeAction") == 0) {
+        lsp_code_action(id, params_json);
     }
     else if (strcmp(method, "$/cancelRequest") == 0) {
         // The request it names was answered already: the ones still queued
@@ -708,8 +765,12 @@ ConfigReload apply_dls_json() {
     remember_config(text);
 
     // Commands are replaced wholesale: a reload must not keep entries from
-    // the previous file.
+    // the previous file.  The debounce/unused-diagnostics switches reset to
+    // their defaults the same way, so a key removed from dls.json goes back
+    // to the default rather than sticking at whatever was last read.
     g_checkers_count = 0;
+    g_debounce_ms = 500;
+    g_unused_diagnostics_enabled = true;
 
     JsonNode* importPaths_json = null;
     if (text is null)
@@ -779,6 +840,14 @@ ConfigReload apply_dls_json() {
             {
                 LWARN("init: dls.json has no check");
             }
+
+            auto debounce_json = json.get_object_item(root_json, "debounceMs");
+            if (json_is_number(debounce_json))
+                g_debounce_ms = json.get_integer(debounce_json);
+
+            auto unused_json = json.get_object_item(root_json, "unusedDiagnostics");
+            if (unused_json !is null)
+                g_unused_diagnostics_enabled = json_is_true(unused_json) != 0;
         }
     }
 
@@ -1001,7 +1070,11 @@ void lsp_sync_change(JsonNode* params_json) {
         return;
     }
 
-    lsp_lint(buffer);
+    // Debounced, not run here: a keystroke is the one lint trigger frequent
+    // enough that running the dispatcher inline would block every other
+    // request behind it.  'schedule_lint' pushes the deadline out on every
+    // call, so a burst of changes only lints once, after the last one.
+    schedule_lint(uri, time.get_time() + g_debounce_ms);
 }
 
 void lsp_sync_close(JsonNode* params_json) {
@@ -1459,7 +1532,39 @@ void send_message(JsonNode* message) {
 	    extern(C) int pclose(FILE* stream);
 	}
 
+/**
+ * Diagnostics for 'buffer', from every source that is enabled, all in one
+ * `publishDiagnostics` (LSP replaces a URI's whole diagnostic set per
+ * notification, so the sources can't be sent separately).  Each source owns
+ * its own severity/tags/code - nothing is hardcoded here - so a future
+ * source with a different shape (say, an error-level check) is one more call
+ * below, not a change to this function.
+ *
+ * Called both eagerly (open/save/external write/config reload) and from the
+ * debounce timer (`run_due_lints`, main.d's loop); either way it is this
+ * buffer's own pending deadline that gets satisfied.
+ */
 void lsp_lint(BUFFER buffer) {
+    clear_lint_pending(buffer.uri);
+
+    auto params = json.create_object();
+    json.add_string_to_object(params, "uri", buffer.uri);
+    auto diagnostics = json.add_array_to_object(params, "diagnostics");
+
+    lint_external_checkers(buffer, diagnostics);
+    if (g_unused_diagnostics_enabled)
+        lint_unused_symbols(buffer, diagnostics);
+
+    lsp_send_notification("textDocument/publishDiagnostics", params);
+}
+
+/**
+ * Diagnostics from the external command configured in dls.json's "check"
+ * list (the path whose prefix matches 'buffer' picks the command).  Its
+ * stdout is parsed line by line for a "file.d:LINE:COL: Severity: message" /
+ * "file.d(LINE,COL): ..." shape; a line without one is skipped.
+ */
+void lint_external_checkers(BUFFER buffer, JsonNode* diagnostics) {
     char* cmd_to_run = null;
 
     // 1. Strip "file://" prefix from URI (7 chars)
@@ -1492,10 +1597,6 @@ void lsp_lint(BUFFER buffer) {
         LWARN("check: no commands for '{}' (resolved path: '{}')", buffer.uri, buffer_path);
         return;
     }
-
-    auto params = json.create_object();
-    json.add_string_to_object(params, "uri", buffer.uri);
-    auto diagnostics = json.add_array_to_object(params, "diagnostics");
 
     // 3. Execute the specific command found
     FILE* pipe = popen(cmd_to_run, "r");
@@ -1578,8 +1679,6 @@ void lsp_lint(BUFFER buffer) {
     } else {
         LWARN("check: command doesn't work '{}' for '{}'", cmd_to_run, buffer.uri);
     }
-
-    lsp_send_notification("textDocument/publishDiagnostics", params);
 }
 
 void lsp_lint_clear(const char *uri) {

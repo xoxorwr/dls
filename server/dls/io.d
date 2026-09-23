@@ -3,6 +3,7 @@ module dls.io;
 import rt.dbg;
 import rt.filesystem;
 import mem = rt.memz;
+import dls.dcd : DUnusedSymbol;
 
 import core.stdc.stdio;
 import core.stdc.stdlib;
@@ -31,15 +32,72 @@ struct BUFFER {
     uint[] semantic_tokens;
     uint semantic_tokens_modules;
     bool semantic_tokens_valid;
+
+    /// The document's unused imports/parameters, and the module cache
+    /// generation they were computed against - same reasoning as
+    /// 'semantic_tokens' above (an import's use depends on other modules
+    /// too).  Heap memory, owned by the buffer.
+    DUnusedSymbol[] unused_symbols;
+    uint unused_symbols_modules;
+    bool unused_symbols_valid;
+
+    /// Whether a debounced lint pass is owed for this buffer, and when it is
+    /// due (an 'rt.time.get_time()' timestamp).  Set by 'schedule_lint' on
+    /// every 'didChange'; a later change pushes the deadline out rather than
+    /// running two passes, which is what makes it a debounce.
+    bool lint_pending;
+    long lint_due_at_ms;
 }
 
-/// Forgets the cached semantic tokens of 'buffer' (its text changed, or it is
-/// being closed).
+/// Forgets the cached semantic tokens of 'buffer' - used both when they go
+/// stale (below) and by 'document_semantic_tokens' (semantic_tokens.d) to
+/// free the old array before storing a freshly computed one.
 void drop_semantic_tokens(mem.Allocator alloc, ref BUFFER buffer) {
     if (buffer.semantic_tokens.length > 0)
         alloc.free(buffer.semantic_tokens);
     buffer.semantic_tokens = null;
     buffer.semantic_tokens_valid = false;
+}
+
+/// Forgets the cached unused-symbol list of 'buffer' - same two uses as
+/// 'drop_semantic_tokens' above, for the unused-import/parameter cache.
+void drop_unused_symbols(mem.Allocator alloc, ref BUFFER buffer) {
+    if (buffer.unused_symbols.length > 0)
+        alloc.free(buffer.unused_symbols);
+    buffer.unused_symbols = null;
+    buffer.unused_symbols_valid = false;
+}
+
+/**
+ * Forgets everything derived from 'buffer's old text: its cached semantic
+ * tokens and unused-symbol list, and any debounced lint that was still
+ * pending for it (a deadline set for text that is gone is meaningless).
+ * Called wherever the content is replaced or the buffer is closed.
+ */
+void drop_buffer_caches(mem.Allocator alloc, ref BUFFER buffer) {
+    drop_semantic_tokens(alloc, buffer);
+    drop_unused_symbols(alloc, buffer);
+    buffer.lint_pending = false;
+}
+
+/**
+ * Marks 'uri' as due for a lint pass at 'due_at_ms', replacing any earlier
+ * pending deadline: a burst of edits only lints once, after the last one.
+ */
+void schedule_lint(const char* uri, long due_at_ms) {
+    auto i = find_buffer_index(uri);
+    if (i < 0) return;
+    buffers[i].lint_pending = true;
+    buffers[i].lint_due_at_ms = due_at_ms;
+}
+
+/// Cancels a pending debounced lint for 'uri' - called wherever a lint pass
+/// just ran eagerly, so a stale deadline does not fire a redundant one right
+/// after.
+void clear_lint_pending(const char* uri) {
+    auto i = find_buffer_index(uri);
+    if (i < 0) return;
+    buffers[i].lint_pending = false;
 }
 
 __gshared BUFFER* buffers;
@@ -162,7 +220,7 @@ BUFFER open_buffer(mem.Allocator alloc, const char * uri, const char * content) 
         auto newContent = dup_cstring(alloc, text);
         free_cstring(alloc, buffers[existing].content);
         buffers[existing].content = newContent;
-        drop_semantic_tokens(alloc, buffers[existing]);
+        drop_buffer_caches(alloc, buffers[existing]);
         return buffers[existing];
     }
 
@@ -232,7 +290,7 @@ void close_buffer(mem.Allocator alloc, const char * uri) {
     }
     free_cstring(alloc, buffers[i].uri);
     free_cstring(alloc, buffers[i].content);
-    drop_semantic_tokens(alloc, buffers[i]);
+    drop_buffer_caches(alloc, buffers[i]);
     for (int j = i; j < first_empty_buf - 1; j++) {
         buffers[j] = buffers[j + 1];
     }

@@ -539,6 +539,25 @@ class LspClient:
             "textDocument/foldingRange", {"textDocument": {"uri": uri}}
         )
 
+    def code_action(
+        self,
+        uri: str,
+        start: tuple[int, int] = (0, 0),
+        end: tuple[int, int] = (0, 0),
+        diagnostics: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        return self.request(
+            "textDocument/codeAction",
+            {
+                "textDocument": {"uri": uri},
+                "range": {
+                    "start": {"line": start[0], "character": start[1]},
+                    "end": {"line": end[0], "character": end[1]},
+                },
+                "context": {"diagnostics": diagnostics or []},
+            },
+        )
+
     # -- lifecycle ---------------------------------------------------------
 
     def close(self) -> None:
@@ -641,6 +660,10 @@ class Doc:
     def folding_range(self):
         return self.client.folding_range(self.uri)
 
+    def code_action(self, start: tuple[int, int] = (0, 0), end: tuple[int, int] = (0, 0),
+                     diagnostics: list[dict] | None = None):
+        return self.client.code_action(self.uri, start, end, diagnostics)
+
 
 class DlsTestCase(unittest.TestCase):
     """Base class starting one shared server per test class.
@@ -657,6 +680,11 @@ class DlsTestCase(unittest.TestCase):
     PROJECT: dict[str, str] = {"app.d": "module app;\n"}
     WRITE_DLS_JSON: bool = True
     CHECK: list[dict[str, str]] | None = None
+    #: dls.json's "debounceMs" (the didChange-triggered lint's idle delay).
+    #: None leaves the server's own default (500ms) in place.
+    DEBOUNCE_MS: int | None = None
+    #: dls.json's "unusedDiagnostics". None leaves the server's default (on).
+    UNUSED_DIAGNOSTICS: bool | None = None
     IMPORT_PATHS: list[str] | None = None
     #: Import paths expressed relative to the test's project root (resolved in
     #: ``setUpClass``, so a test can keep the project root out of them - which
@@ -690,6 +718,10 @@ class DlsTestCase(unittest.TestCase):
             config: dict[str, Any] = {"importPaths": import_paths}
             if cls.CHECK:
                 config["check"] = cls.CHECK
+            if cls.DEBOUNCE_MS is not None:
+                config["debounceMs"] = cls.DEBOUNCE_MS
+            if cls.UNUSED_DIAGNOSTICS is not None:
+                config["unusedDiagnostics"] = cls.UNUSED_DIAGNOSTICS
             with open(os.path.join(cls.root, "dls.json"), "w", encoding="utf-8") as handle:
                 json.dump(config, handle)
 

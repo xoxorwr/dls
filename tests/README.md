@@ -39,6 +39,9 @@ far the most expensive part of a run.
 | `test_semantic_tokens_refresh.py` | tokens that depend on an imported module, `workspace/semanticTokens/refresh` |
 | `test_cancellation.py` | `$/cancelRequest`, `ContentModified` for superseded tokens, message framing |
 | `test_diagnostics.py` | the `check` command pipeline in `dls.json` |
+| `test_unused_diagnostics.py` | the built-in unused-import/unused-parameter lint |
+| `test_code_action.py` | `textDocument/codeAction`, the remove-unused-import quickfix |
+| `test_debounce.py` | the `didChange` debounce, and the diagnostics dispatcher composing multiple sources |
 | `test_document_sync.py` | didOpen/didChange/didSave/didClose, open-document table |
 | `test_notification_robustness.py` | malformed, late or wrongly-typed notifications and unopened documents |
 | `test_save_flow.py` | save cost contract: identical text must not re-parse |

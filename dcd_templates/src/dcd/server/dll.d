@@ -26,12 +26,14 @@ import dcd.common.messages;
 import dcd.server.autocomplete;
 import dcd.server.autocomplete.util;
 
+import dparse.ast;
 import dparse.lexer;
 
 import dsymbol.scope_;
 import dsymbol.symbol;
 import dsymbol.modulecache;
 import dsymbol.utils;
+import dsymbol.conversion.first : convertChainToImportPath;
 
 
 __gshared:
@@ -410,23 +412,34 @@ private ubyte semanticTokenTypeOf(CompletionKind kind) pure nothrow @safe @nogc
 }
 
 /**
- * The symbol an identifier token names and what that symbol is.
+ * The symbol the token chain ending at 'parserTokens[parserIndex]' resolves
+ * to, or null.
  *
  * The scope tree only holds the names that are visible where they are
  * written, which is what a declaration and a plain use need; a member after a
  * `.` (`state.valuea`) is resolved through the expression walk instead, the
- * same way hover does it.
+ * same way hover does it.  Shared by every walk that classifies the token
+ * stream this way (semantic tokens, unused-symbol detection).
+ */
+private DSymbol* resolveTokenSymbol(const(Token)[] parserTokens, size_t parserIndex,
+    Scope* symbolScope)
+{
+    auto expression = getExpression(parserTokens[0 .. parserIndex + 1]);
+    auto symbols = getSymbolsByTokenChain(symbolScope, expression,
+        parserTokens[parserIndex].index, CompletionType.location);
+    return symbols.length == 0 ? null : symbols[0];
+}
+
+/**
+ * The symbol an identifier token names and what that symbol is.
  */
 private ubyte identifierTokenType(const(Token) token, const(Token)[] parserTokens,
     size_t parserIndex, Scope* symbolScope, out DSemanticModifiers modifiers)
 {
-    auto expression = getExpression(parserTokens[0 .. parserIndex + 1]);
-    auto symbols = getSymbolsByTokenChain(symbolScope, expression, token.index,
-        CompletionType.location);
-    if (symbols.length == 0 || symbols[0] is null)
+    auto symbol = resolveTokenSymbol(parserTokens, parserIndex, symbolScope);
+    if (symbol is null)
         return DSemanticTokenType.none;
 
-    auto symbol = symbols[0];
     // A function with a body records the end of its name as its location
     // (`FirstPass.visit(FunctionDeclaration)` puts its scope there) instead of
     // the name's start, so both spellings have to mean "declaration".
@@ -508,6 +521,399 @@ extern(C) export DSemanticToken[] dcd_semantic_tokens(const(char)* filename, con
         if (type == DSemanticTokenType.none)
             continue;
         ret ~= DSemanticToken(token.index, token.text.length, type, modifiers);
+    }
+
+    return ret;
+}
+
+/// Kinds `dcd_unused_symbols` reports.
+enum DUnusedKind : ubyte { import_ = 0, parameter = 1 }
+
+/**
+ * One unused import name/binding or unused parameter: the span to
+ * underline, and - for an import only - the byte range a "remove it" code
+ * action deletes (see `dcd_unused_symbols` for how a comma-separated list is
+ * handled: sometimes that is the whole statement, sometimes just the one
+ * item and an adjacent comma).
+ */
+struct DUnusedSymbol
+{
+    size_t start;
+    size_t length;
+    DUnusedKind kind;
+    string name;
+    size_t removeStart;
+    size_t removeLength;
+}
+
+/**
+ * One import name/binding or parameter this file declares, collected by
+ * `UnusedCandidateVisitor` - a place the token-stream pass in
+ * `dcd_unused_symbols` checks for a use, and what to report if none is
+ * found.  `start` doubles as that pass's key for "this token is the
+ * declaration itself, not a use of it".
+ */
+private struct UnusedCandidate
+{
+    size_t start;
+    size_t length;
+    DUnusedKind kind;
+    string name;
+    size_t removeStart;
+    size_t removeLength;
+    bool used;
+
+    // The comparison key a use is matched against, filled in differently per
+    // kind.  A whole-module import matches by the module it names (any
+    // symbol used from that module counts, qualified or not, via
+    // `modulePath`); a selective binding or a parameter matches by the exact
+    // resolved symbol via `target` (`matchByTarget`) - a parameter's own is
+    // captured lazily, the first time the token-stream pass reaches its
+    // declaration token.
+    string modulePath;
+    DSymbol* target;
+    bool matchByTarget;
+}
+
+/// The byte offset just past `token` - text tokens (identifiers, literals)
+/// carry their own length, static ones (keywords, punctuation) spell it.
+private size_t tokenEnd(const Token token)
+{
+    return token.index + (token.text.length > 0 ? token.text.length : str(token.type).length);
+}
+
+/// Whether `fn` is written `override` - checked in both positions the
+/// grammar allows it: a prefix storage class (`override void foo()`, by far
+/// the common style) or a postfix member-function attribute (`void foo() override`).
+private bool hasOverride(const(StorageClass)[] storageClasses,
+    const(MemberFunctionAttribute)[] memberAttrs)
+{
+    foreach (s; storageClasses)
+        if (s.token.type == tok!"override")
+            return true;
+    foreach (a; memberAttrs)
+        if (a.tokenType == tok!"override")
+            return true;
+    return false;
+}
+
+/// Whether `body_` is an actual body (braces or `=> expr`), not a bare `;`
+/// declaration (interface method, abstract, `extern`) - `FunctionBody` wraps
+/// all three shapes, so a non-null `FunctionBody` alone does not mean there
+/// is anything to walk for uses.
+private bool hasRealBody(const FunctionBody body_)
+{
+    return body_ !is null && body_.missingFunctionBody is null;
+}
+
+/**
+ * The byte range a code action deletes to drop one comma-separated item
+ * (spanning `itemTokens`) out of a declaration (spanning `declTokens`, with
+ * overall bounds `[declStart, declEnd)`): the item's own tokens plus one
+ * adjacent comma - the one after it, or the one before it when this is the
+ * last of several - or, when there is no comma at all (the only item), the
+ * whole declaration.
+ */
+private void listItemRemoval(const(Token)[] declTokens, const(Token)[] itemTokens,
+    size_t declStart, size_t declEnd, out size_t removeStart, out size_t removeLength)
+{
+    immutable itemStart = itemTokens[0].index;
+    immutable itemEnd = tokenEnd(itemTokens[$ - 1]);
+
+    foreach (t; declTokens)
+    {
+        if (t.index < itemEnd)
+            continue;
+        if (t.type == tok!",")
+        {
+            removeStart = itemStart;
+            removeLength = tokenEnd(t) - itemStart;
+            return;
+        }
+    }
+
+    size_t precedingComma = size_t.max;
+    foreach (t; declTokens)
+    {
+        if (t.index >= itemStart)
+            break;
+        if (t.type == tok!",")
+            precedingComma = t.index;
+    }
+    if (precedingComma != size_t.max)
+    {
+        removeStart = precedingComma;
+        removeLength = itemEnd - precedingComma;
+        return;
+    }
+
+    removeStart = declStart;
+    removeLength = declEnd - declStart;
+}
+
+/**
+ * Collects every module-level import name/binding and every parameter of a
+ * function/constructor that has a body, as `UnusedCandidate`s.
+ *
+ * Only module-level imports are considered - the walk still descends into
+ * function bodies (for nested functions and their own parameters), it just
+ * does not record an import found inside one.  `public import` is skipped
+ * entirely (meant for re-export, not local use), detected from the enclosing
+ * `Declaration`'s own attributes - a narrower check than DCD's own
+ * protection stack (which also tracks `public:` blocks), not worth
+ * replicating in full here.
+ */
+private final class UnusedCandidateVisitor : ASTVisitor
+{
+    UnusedCandidate[] candidates;
+
+    alias visit = ASTVisitor.visit;
+
+    override void visit(const Declaration dec)
+    {
+        // `override` (like `public`) is parsed as a declaration-prefix
+        // Attribute, not as a FunctionDeclaration.storageClasses/
+        // memberFunctionAttributes entry - see dparse's parseAttribute.
+        immutable wasPublic = declarationIsPublic;
+        immutable wasOverride = declarationIsOverride;
+        foreach (attr; dec.attributes)
+        {
+            if (attr.attribute.type == tok!"public")
+                declarationIsPublic = true;
+            else if (attr.attribute.type == tok!"override")
+                declarationIsOverride = true;
+        }
+        super.visit(dec);
+        declarationIsPublic = wasPublic;
+        declarationIsOverride = wasOverride;
+    }
+
+    override void visit(const ImportDeclaration importDecl)
+    {
+        if (!declarationIsPublic && functionDepth == 0)
+        {
+            foreach (single; importDecl.singleImports)
+            {
+                if (single is null || single.identifierChain is null
+                    || single.identifierChain.identifiers.length == 0)
+                    continue;
+                addWholeModuleImport(importDecl, single);
+            }
+            if (importDecl.importBindings !is null
+                && importDecl.importBindings.singleImport !is null
+                && importDecl.importBindings.singleImport.identifierChain !is null)
+                addSelectiveImports(importDecl, importDecl.importBindings);
+        }
+        // Nothing nested is worth visiting inside an import statement.
+    }
+
+    override void visit(const FunctionDeclaration fn)
+    {
+        if (hasRealBody(fn.functionBody) && fn.parameters !is null && !declarationIsOverride
+            && !hasOverride(fn.storageClasses, fn.memberFunctionAttributes))
+            addParameters(fn.parameters);
+        functionDepth++;
+        super.visit(fn);
+        functionDepth--;
+    }
+
+    override void visit(const Constructor ctor)
+    {
+        if (hasRealBody(ctor.functionBody) && ctor.parameters !is null)
+            addParameters(ctor.parameters);
+        functionDepth++;
+        super.visit(ctor);
+        functionDepth--;
+    }
+
+    private bool declarationIsPublic;
+    private bool declarationIsOverride;
+    private int functionDepth;
+
+    private void addParameters(const Parameters parameters)
+    {
+        foreach (p; parameters.parameters)
+        {
+            if (p.name.text.length == 0 || p.name.text[0] == '_')
+                continue;
+            UnusedCandidate c;
+            c.start = p.name.index;
+            c.length = p.name.text.length;
+            c.kind = DUnusedKind.parameter;
+            c.name = p.name.text.idup; // survives past this call, unlike a lexer-owned slice
+            c.matchByTarget = true; // 'target' is filled in lazily
+            candidates ~= c;
+        }
+    }
+
+    private void addWholeModuleImport(const ImportDeclaration importDecl, const SingleImport single)
+    {
+        immutable path = convertChainToImportPath(single.identifierChain);
+        auto modulePath = cache.resolveImportLocation(path);
+        if (modulePath is null)
+            return; // unresolvable - nothing to compare a use against
+
+        const nameToken = single.rename == tok!"" ? single.identifierChain.identifiers[$ - 1] : single.rename;
+
+        UnusedCandidate c;
+        c.start = nameToken.index;
+        c.length = nameToken.text.length;
+        c.kind = DUnusedKind.import_;
+        c.name = nameToken.text.idup; // ditto
+        c.modulePath = modulePath;
+        listItemRemoval(importDecl.tokens, single.tokens, importDecl.startIndex, importDecl.endIndex,
+            c.removeStart, c.removeLength);
+        candidates ~= c;
+    }
+
+    private void addSelectiveImports(const ImportDeclaration importDecl, const ImportBindings bindings)
+    {
+        immutable path = convertChainToImportPath(bindings.singleImport.identifierChain);
+        auto modulePath = cache.resolveImportLocation(path);
+        if (modulePath is null)
+            return;
+        auto moduleSymbol = cache.cacheModule(modulePath);
+        if (moduleSymbol is null)
+            return;
+
+        foreach (bind; bindings.importBinds)
+        {
+            immutable bool renamed = bind.right != tok!"";
+            immutable origName = renamed ? bind.right.text : bind.left.text;
+            if (origName.length == 0 || bind.left.text.length == 0)
+                continue;
+            auto target = moduleSymbol.getFirstPartNamed(internString(origName));
+            if (target is null)
+                continue;
+
+            UnusedCandidate c;
+            c.start = bind.left.index;
+            c.length = bind.left.text.length;
+            c.kind = DUnusedKind.import_;
+            c.name = bind.left.text.idup; // ditto
+            c.target = target;
+            c.matchByTarget = true;
+            listItemRemoval(importDecl.tokens, bind.tokens, importDecl.startIndex, importDecl.endIndex,
+                c.removeStart, c.removeLength);
+            candidates ~= c;
+        }
+    }
+}
+
+/**
+ * The imports and parameters this file declares but never uses again.
+ *
+ * Declarations are read from the syntax tree (`UnusedCandidateVisitor`), not
+ * from the resolved symbol tree: a plain (non-renamed) import's `DSymbol`
+ * carries no real in-file position (`location` is 0, the name is a sentinel -
+ * see `dsymbol.conversion.first`'s import visitor), so there is nothing
+ * there to underline or key a removal edit from.
+ *
+ * Whether a candidate is used is answered by one linear pass over the same
+ * token-and-resolve walk `dcd_semantic_tokens` already does: for every
+ * identifier token, resolve it, and it is either a candidate's own
+ * declaration token (by byte offset - skip it, and for a parameter this is
+ * also where its comparison pointer is captured) or a use, checked against
+ * every candidate (a handful, K) rather than inserted into a map sized by
+ * the file's identifier count (N, in the thousands) - O(n*K) with a trivial
+ * per-comparison cost, and no allocation beyond the result itself.
+ */
+extern(C) export DUnusedSymbol[] dcd_unused_symbols(const(char)* filename, const(char)* content)
+{
+    import containers.hashset;
+    import dcd.server.autocomplete.util;
+
+    import dparse.lexer;
+    import dparse.rollback_allocator;
+
+    import dsymbol.builtin.names;
+    import dsymbol.builtin.symbols;
+    import dsymbol.conversion;
+    import dsymbol.modulecache;
+    import dsymbol.scope_;
+    import dsymbol.string_interning;
+    import dsymbol.symbol;
+    import dsymbol.utils;
+
+    DUnusedSymbol[] ret;
+    if (content is null)
+        return ret;
+    auto source = cast(ubyte[]) fromStringz(content);
+    if (source.length == 0)
+        return ret;
+
+    auto sc = StringCache(source.length.optimalBucketCount);
+
+    LexerConfig parserConfig;
+    parserConfig.fileName = "";
+    auto parserTokens = getTokensForParser(source, parserConfig, &sc);
+
+    RollbackAllocator rba;
+    auto pair = generateAutocompleteTrees(parserTokens, &rba, source.length, cache, true);
+    scope(exit) pair.destroy();
+
+    auto visitor = new UnusedCandidateVisitor();
+    pair.syntaxTree.accept(visitor);
+    auto candidates = visitor.candidates;
+    if (candidates.length == 0)
+        return ret;
+
+    foreach (i, token; parserTokens)
+    {
+        if (token.type != tok!"identifier" || token.text.length == 0)
+            continue;
+
+        // Is this token one of the candidates' own declaration tokens?
+        bool isDeclaration;
+        foreach (ref c; candidates)
+        {
+            if (c.start != token.index)
+                continue;
+            isDeclaration = true;
+            if (c.kind == DUnusedKind.parameter && c.target is null)
+                c.target = resolveTokenSymbol(parserTokens, i, pair.scope_);
+            break;
+        }
+        if (isDeclaration)
+            continue;
+
+        auto symbol = resolveTokenSymbol(parserTokens, i, pair.scope_);
+        if (symbol is null)
+            continue;
+
+        foreach (ref c; candidates)
+        {
+            if (c.used)
+                continue;
+            if (c.matchByTarget)
+            {
+                if (c.target !is null && c.target is symbol)
+                    c.used = true;
+            }
+            else if (c.modulePath.length > 0 && symbol.symbolFile == c.modulePath)
+            {
+                c.used = true;
+            }
+        }
+    }
+
+    foreach (c; candidates)
+    {
+        if (c.used)
+            continue;
+        auto d = DUnusedSymbol(c.start, c.length, c.kind, c.name);
+        if (c.kind == DUnusedKind.import_)
+        {
+            d.removeStart = c.removeStart;
+            d.removeLength = c.removeLength;
+            // No blank line left behind when the whole statement goes.
+            immutable past = d.removeStart + d.removeLength;
+            if (past < source.length && source[past] == '\n')
+                d.removeLength++;
+            else if (past + 1 < source.length && source[past] == '\r' && source[past + 1] == '\n')
+                d.removeLength += 2;
+        }
+        ret ~= d;
     }
 
     return ret;

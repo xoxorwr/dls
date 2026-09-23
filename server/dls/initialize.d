@@ -31,7 +31,8 @@ void lsp_initialize(int id, JsonNode* params_json) {
             //.add_number("textDocumentSync", 1)
             .add_bool("hoverProvider", 1)
             .add_bool("definitionProvider", 1)
-            .add_bool("documentSymbolProvider", 1);
+            .add_bool("documentSymbolProvider", 1)
+            .add_bool("codeActionProvider", 1);
 
 
     auto sync = json.add_object_to_object(capabilities, "textDocumentSync");

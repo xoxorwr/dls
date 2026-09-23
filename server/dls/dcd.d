@@ -168,6 +168,25 @@ struct DSemanticToken
 
 extern(C) DSemanticToken[] dcd_semantic_tokens(const(char)* filename, const(char)* content);
 
+enum DUnusedKind : ubyte { import_ = 0, parameter = 1 }
+
+/**
+ * One unused import name/binding or unused parameter: the span to
+ * underline, and - for an import only - the byte range a "remove it" code
+ * action deletes.
+ */
+struct DUnusedSymbol
+{
+    size_t start;
+    size_t length;
+    DUnusedKind kind;
+    string name;
+    size_t removeStart;
+    size_t removeLength;
+}
+
+extern(C) DUnusedSymbol[] dcd_unused_symbols(const(char)* filename, const(char)* content);
+
 /**
  * A folding range: the lines a client hides when the region is collapsed.
  * The lines are zero-based, as the protocol wants them; `kind` is null for a
