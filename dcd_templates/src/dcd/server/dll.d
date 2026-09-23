@@ -755,11 +755,33 @@ private final class UnusedCandidateVisitor : ASTVisitor
 
         const nameToken = single.rename == tok!"" ? single.identifierChain.identifiers[$ - 1] : single.rename;
 
+        // A rename introduces its own binding, so that alias is what a
+        // "remove/underline this" message should name. An un-renamed import
+        // has no binding of its own though - `nameToken` is just the last
+        // segment of the chain - so the message names the whole qualified
+        // path ('rt.io.binary', not the ambiguous-when-several-modules-
+        // share-a-tail 'binary') instead.
+        string displayName;
+        if (single.rename == tok!"")
+        {
+            import std.array : appender;
+            auto app = appender!string();
+            foreach (i, ident; single.identifierChain.identifiers)
+            {
+                app.put(ident.text);
+                if (i + 1 < single.identifierChain.identifiers.length)
+                    app.put(".");
+            }
+            displayName = app.data;
+        }
+        else
+            displayName = nameToken.text.idup;
+
         UnusedCandidate c;
         c.start = nameToken.index;
         c.length = nameToken.text.length;
         c.kind = DUnusedKind.import_;
-        c.name = nameToken.text.idup; // ditto
+        c.name = displayName;
         c.modulePath = modulePath;
         listItemRemoval(importDecl.tokens, single.tokens, importDecl.startIndex, importDecl.endIndex,
             c.removeStart, c.removeLength);
