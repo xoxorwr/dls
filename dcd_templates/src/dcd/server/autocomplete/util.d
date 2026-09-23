@@ -1051,21 +1051,24 @@ AutocompleteResponse.Completion makeSymbolCompletionInfo(const DSymbol* symbol, 
 		ret.definition = symbol.name; // TODO: add enum value to definition string
 	else if (kind == CompletionKind.structName || kind == CompletionKind.className)
 	{
+		import std.array : array;
+
 		string newName;
-		istring[] t_type;
-		foreach(part; symbol.opSlice())
-		{
-			if (part.kind == CompletionKind.typeTmpParam)
-				t_type ~= part.name;
-		}
-		auto tcount = t_type.length;
-		if (tcount > 0)
+		// opSlice() walks the symbol's `parts` (a lookup-oriented container,
+		// not an ordered list), so it does not hand these back in the order
+		// they were declared - sorted by `location` (source byte offset)
+		// puts `Pair(K, V)` back the right way round instead of `Pair(V, K)`.
+		auto typeParams = symbol.opSlice()
+			.filter!(part => part.kind == CompletionKind.typeTmpParam)
+			.array;
+		typeParams.sort!((a, b) => a.location < b.location);
+		if (typeParams.length > 0)
 		{
 			newName = symbol.name ~ "(";
-			foreach(i, part; t_type)
+			foreach(i, part; typeParams)
 			{
-				newName ~= part;
-				if (i < tcount - 1)
+				newName ~= part.name;
+				if (i + 1 < typeParams.length)
 					newName ~= ", ";
 			}
 			newName ~= ")";

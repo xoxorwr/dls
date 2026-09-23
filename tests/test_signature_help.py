@@ -98,3 +98,84 @@ class FunctionPointerSignatureTests(DlsTestCase):
 
     def test_a_function_pointer_field(self):
         self.assertEqual(self.labels_at("b.fp("), ["void function(State*)"])
+
+
+TEMPLATE_SHAPES = """module app;
+
+struct TD(T)
+{
+    T data;
+}
+
+struct Pair(K, V)
+{
+    K key;
+    V value;
+}
+
+struct Constrained(T : int)
+{
+    T data;
+}
+
+// A template parameter list followed by a body field that itself contains
+// parens - a function pointer - used to mislead the closing-paren search
+// into swallowing part of the body into the parameter list.
+struct TemplWithFnPtr(T)
+{
+    void function(T) fp;
+}
+
+struct Plain
+{
+    int x;
+}
+
+void main()
+{
+    TD!()
+    TD()
+    Pair!()
+    Constrained!()
+    TemplWithFnPtr!()
+    Plain()
+}
+"""
+
+
+class TemplateInstantiationSignatureHelpTests(DlsTestCase):
+    """Regression: `Name!(...)` instantiates a template and should show its
+    parameter list (`TD(T)`), not the constructor `Name(...)` calls - which
+    is built from the struct's *fields*, not its template parameters, and
+    used to show up here instead regardless of the `!`.
+    """
+
+    PROJECT = {"app.d": TEMPLATE_SHAPES}
+
+    def setUp(self):
+        self.doc = self.open_doc("app.d")
+
+    def _params_at(self, needle):
+        result = self.doc.signature_help(needle)
+        self.assertEqual(len(result["signatures"]), 1)
+        return [p["label"] for p in result["signatures"][0]["parameters"]]
+
+    def test_bang_paren_shows_the_template_parameter_list(self):
+        self.assertEqual(self._params_at("TD!("), ["T"])
+
+    def test_plain_paren_still_shows_the_constructor(self):
+        # Unlike `TD!(`, `TD(` is an ordinary call and must still resolve to
+        # the (implicit) constructor, built from the struct's fields.
+        self.assertEqual(self._params_at("    TD("), ["T data"])
+
+    def test_multiple_type_parameters_stay_in_declaration_order(self):
+        self.assertEqual(self._params_at("Pair!("), ["K", "V"])
+
+    def test_a_constrained_template_parameter_is_kept_whole(self):
+        self.assertEqual(self._params_at("Constrained!("), ["T : int"])
+
+    def test_a_body_only_paren_does_not_leak_into_the_parameter_list(self):
+        self.assertEqual(self._params_at("TemplWithFnPtr!("), ["T"])
+
+    def test_a_non_templated_struct_call_is_unaffected(self):
+        self.assertEqual(self._params_at("    Plain("), ["int x"])

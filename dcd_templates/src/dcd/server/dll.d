@@ -1466,7 +1466,9 @@ extern(C) SignatureHelpResponse dcd_get_signature(const(char)* filename, const(c
 
     // 2. Define the exact end of the expression (drop the `!` if it's a template bang)
     size_t exprEnd = openParenIdx;
-    if (exprEnd > 0 && beforeTokensRelease[exprEnd - 1].type == tok!"!")
+    immutable bool isTemplateInstantiation =
+        exprEnd > 0 && beforeTokensRelease[exprEnd - 1].type == tok!"!";
+    if (isTemplateInstantiation)
     {
         exprEnd--;
     }
@@ -1536,8 +1538,12 @@ extern(C) SignatureHelpResponse dcd_get_signature(const(char)* filename, const(c
 	    if (resolved.kind == CompletionKind.aliasName && resolved.type !is null)
 	        resolved = resolved.type;
 
-	    // If it's a struct/class, find the constructor
-	    if (
+	    // `Name(args)` calls the constructor; `Name!(args)` instantiates the
+	    // template instead, so its own callTip (the "Name(Params)" built by
+	    // createCallTip/formatCallTip) is what belongs here, not the
+	    // constructor's - which is built from the struct's *fields*, not its
+	    // template parameters, and would otherwise show up as this hint.
+	    if (!isTemplateInstantiation &&
 	        (resolved.kind == CompletionKind.structName || resolved.kind == CompletionKind.unionName || resolved.kind == CompletionKind.className))
 	    {
 	        DSymbol* ctorSym = null;
@@ -1572,14 +1578,45 @@ extern(C) SignatureHelpResponse dcd_get_signature(const(char)* filename, const(c
 
 ParameterInformation[] parseParameters(string callTip)
 {
-    import std.string: indexOf, lastIndexOf;
     ParameterInformation[] params;
 
-    auto openParen = callTip.indexOf('(');
-    if (openParen < 0) return params;
-
-    auto closeParen = cast(size_t) callTip.lastIndexOf(')');
-    if (closeParen < 0 || closeParen <= openParen) return params;
+    // The *last* top-level ('(' at depth 0) parenthesized group, not the
+    // first. A plain function's callTip has exactly one - the value
+    // parameter list - so this changes nothing for it. A templated
+    // function's has two back to back (`T get(T)(T data)`: the template
+    // parameter list, then the value one), and it is the second - the call
+    // site's actual arguments - that signature help for a *call* means to
+    // show, not the first. A struct/union's callTip (used instead when
+    // `Name!(...)` is being completed, not called) has only the one group
+    // before its body - a field inside that body, a function pointer say,
+    // can itself contain parens, but those sit deeper than depth 0 (the
+    // body's own '{' already raised the depth), so they are never mistaken
+    // for a second top-level group.
+    size_t openParen = size_t.max;
+    size_t closeParen = size_t.max;
+    size_t groupStart = size_t.max;
+    int groupDepth = 0;
+    foreach (i, c; callTip)
+    {
+        if (c == '(' || c == '[' || c == '{' || c == '<')
+        {
+            if (groupDepth == 0 && c == '(')
+                groupStart = i;
+            groupDepth++;
+        }
+        else if (c == ')' || c == ']' || c == '}' || c == '>')
+        {
+            groupDepth--;
+            if (groupDepth == 0 && groupStart != size_t.max)
+            {
+                openParen = groupStart;
+                closeParen = i;
+                groupStart = size_t.max;
+            }
+        }
+    }
+    if (openParen == size_t.max || closeParen == size_t.max || closeParen <= openParen)
+        return params;
 
     auto paramStr = callTip[openParen + 1 .. closeParen];
     if (paramStr.length == 0) return params;

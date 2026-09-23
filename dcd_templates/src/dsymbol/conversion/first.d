@@ -1084,6 +1084,8 @@ private:
 		}
 
 		app.put(currentSymbol.acSymbol.name.data);
+		if (currentAggregateTemplateParameters !is null)
+			app.formatNode(currentAggregateTemplateParameters);
 		app.put(" {\n");
 		foreach (field; zip(structFieldTypes[], structFieldNames[], structFieldStatic[]))
 		{
@@ -1245,6 +1247,11 @@ private:
 		protection.beginScope();
 		scope (exit) protection.endScope();
 		processTemplateParameters(currentSymbol, dec.templateParameters);
+
+		auto savedAggregateTemplateParameters = currentAggregateTemplateParameters;
+		currentAggregateTemplateParameters = dec.templateParameters;
+		scope(exit) currentAggregateTemplateParameters = savedAggregateTemplateParameters;
+
 		dec.accept(this);
 	}
 
@@ -1648,6 +1655,13 @@ private:
 
 	/// Last comment for ditto-ing
 	istring lastComment;
+
+	/// The template parameter list of the struct/union currently being
+	/// visited (`(T)` in `struct TD(T)`), read by `createCallTip()` once it
+	/// reaches the closing brace - saved/restored the same way `lastComment`
+	/// is, so a struct nested inside a templated one sees its own list, not
+	/// the enclosing one's.
+	Rebindable!(const TemplateParameters) currentAggregateTemplateParameters;
 
 	const Module mod;
 
