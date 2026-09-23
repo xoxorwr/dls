@@ -50,7 +50,12 @@ struct SignatureInformation {
 struct ParameterInformation {
     // The label of this parameter information.
     // Can be a string (the parameter name) or a [start, end] uint offset.
-    string label; 
+    string label;
+
+    // 'label's exact [start, end) offset within the owning
+    // SignatureInformation.label, when known (-1 otherwise).
+    int labelStart = -1;
+    int labelEnd = -1;
 
     // The human-readable doc-comment of this parameter.
     string documentation; // (Optional)

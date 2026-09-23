@@ -3,6 +3,28 @@
 from harness import DlsTestCase
 
 
+def param_text(signature, parameter):
+    """The text a `ParameterInformation.label` stands for, resolved the way
+    a real LSP client does: a plain string is used as-is, a `[start, end]`
+    pair is sliced out of the owning `SignatureInformation.label`.
+
+    Slicing rather than trusting the string on its own is the point of these
+    tests: the offset form exists specifically so the client highlights the
+    exact occurrence dls means, not whichever one a text search happens to
+    find first (a single-letter template parameter like `T` can appear
+    several times in one label - see `T get(T)(T data)` below).
+    """
+    label = parameter["label"]
+    if isinstance(label, list):
+        start, end = label
+        return signature["label"][start:end]
+    return label
+
+
+def param_texts(signature):
+    return [param_text(signature, p) for p in signature["parameters"]]
+
+
 SOURCE = """module app;
 
 /**
@@ -39,8 +61,15 @@ class SignatureHelpTests(DlsTestCase):
         # The cursor sits after the first argument's comma.
         self.assertEqual(result["activeParameter"], 1)
 
-        parameters = result["signatures"][0]["parameters"]
-        self.assertEqual([parameter["label"] for parameter in parameters], ["int a", "int b"])
+        self.assertEqual(param_texts(result["signatures"][0]), ["int a", "int b"])
+
+    def test_parameter_labels_are_offsets_into_the_signature_label(self):
+        result = self.doc.signature_help("add(1, ")
+        signature = result["signatures"][0]
+        self.assertEqual(signature["label"], "int add(int a, int b)")
+        # "int a" starts right after "int add(".
+        self.assertEqual(signature["parameters"][0]["label"], [8, 13])
+        self.assertEqual(signature["parameters"][1]["label"], [15, 20])
 
     def test_active_parameter_is_zero_for_the_first_argument(self):
         # Cursor directly after the opening parenthesis of the call.
@@ -158,7 +187,7 @@ class TemplateInstantiationSignatureHelpTests(DlsTestCase):
     def _params_at(self, needle):
         result = self.doc.signature_help(needle)
         self.assertEqual(len(result["signatures"]), 1)
-        return [p["label"] for p in result["signatures"][0]["parameters"]]
+        return param_texts(result["signatures"][0])
 
     def test_bang_paren_shows_the_template_parameter_list(self):
         self.assertEqual(self._params_at("TD!("), ["T"])
@@ -227,7 +256,7 @@ class TemplateFunctionSignatureHelpTests(DlsTestCase):
     def _params_at(self, needle):
         result = self.doc.signature_help(needle)
         self.assertEqual(len(result["signatures"]), 1)
-        return [p["label"] for p in result["signatures"][0]["parameters"]]
+        return param_texts(result["signatures"][0])
 
     def test_plain_call_shows_the_value_parameters(self):
         self.assertEqual(self._params_at("    get("), ["T data"])
@@ -244,3 +273,24 @@ class TemplateFunctionSignatureHelpTests(DlsTestCase):
         # only passes if `!` actually steers the choice, not the shape.
         self.assertEqual(self._params_at("noValueParams!("), ["T"])
         self.assertEqual(self._params_at("    noValueParams("), [])
+
+    def test_get_paren_and_get_bang_paren_highlight_different_occurrences_of_t(self):
+        """Regression: `T` appears three times in `T get(T)(T data)` - the
+        return type, the template parameter, and the value parameter's type.
+        Resolving `param_text` to the right substring isn't enough to catch
+        a client highlighting the *wrong* occurrence if that occurrence also
+        happens to read "T" - so this asserts the actual offsets, not just
+        the text they resolve to.
+        """
+        result = self.doc.signature_help("get!(")
+        signature = result["signatures"][0]
+        self.assertEqual(signature["label"], "T get(T)(T data)")
+        # The template parameter's own "T", inside "(T)" - not the return
+        # type's "T" at offset 0.
+        self.assertEqual(signature["parameters"][0]["label"], [6, 7])
+
+        result = self.doc.signature_help("    get(")
+        signature = result["signatures"][0]
+        self.assertEqual(signature["label"], "T get(T)(T data)")
+        # "T data", inside the second "(...)", not the first.
+        self.assertEqual(signature["parameters"][0]["label"], [9, 15])

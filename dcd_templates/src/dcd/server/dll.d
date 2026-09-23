@@ -1630,6 +1630,27 @@ ParameterInformation[] parseParameters(string callTip, bool wantFirstGroup = fal
     auto paramStr = callTip[group.open + 1 .. group.close];
     if (paramStr.length == 0) return params;
 
+    // 'localStart .. localEnd' is trimmed of surrounding whitespace but
+    // still an offset into 'paramStr' - 'group.open + 1 +' turns that into
+    // the absolute offset into 'callTip' the client needs for the
+    // [start, end] label.
+    void addParam(size_t localStart, size_t localEnd)
+    {
+        while (localStart < localEnd
+            && (paramStr[localStart] == ' ' || paramStr[localStart] == '\t'))
+            localStart++;
+        while (localEnd > localStart
+            && (paramStr[localEnd - 1] == ' ' || paramStr[localEnd - 1] == '\t'))
+            localEnd--;
+        if (localEnd <= localStart) return;
+
+        ParameterInformation info;
+        info.label = paramStr[localStart .. localEnd];
+        info.labelStart = cast(int)(group.open + 1 + localStart);
+        info.labelEnd = cast(int)(group.open + 1 + localEnd);
+        params ~= info;
+    }
+
     int depth = 0;
     size_t start = 0;
     for (size_t i = 0; i < paramStr.length; i++)
@@ -1641,24 +1662,11 @@ ParameterInformation[] parseParameters(string callTip, bool wantFirstGroup = fal
             depth--;
         else if (c == ',' && depth == 0)
         {
-            auto param = paramStr[start .. i];
+            addParam(start, i);
             start = i + 1;
-            while (param.length > 0 && (param[0] == ' ' || param[0] == '\t'))
-                param = param[1 .. $];
-            while (param.length > 0 && (param[$-1] == ' ' || param[$-1] == '\t'))
-                param = param[0 .. $-1];
-            if (param.length > 0)
-                params ~= ParameterInformation(param);
         }
     }
-
-    auto param = paramStr[start .. $];
-    while (param.length > 0 && (param[0] == ' ' || param[0] == '\t'))
-        param = param[1 .. $];
-    while (param.length > 0 && (param[$-1] == ' ' || param[$-1] == '\t'))
-        param = param[0 .. $-1];
-    if (param.length > 0)
-        params ~= ParameterInformation(param);
+    addParam(start, paramStr.length);
 
     return params;
 }
@@ -1691,7 +1699,18 @@ struct SignatureInformation {
 struct ParameterInformation {
     // The label of this parameter information.
     // Can be a string (the parameter name) or a [start, end] uint offset.
-    string label; 
+    string label;
+
+    // 'label's exact [start, end) offset within the owning
+    // SignatureInformation.label, when known (-1 otherwise). Sent as LSP's
+    // [start, end] form instead of the bare string above whenever it's
+    // available, so the client highlights the exact substring instead of
+    // searching the whole label for 'label' as text and (silently)
+    // matching the first, possibly unrelated, occurrence - a single-letter
+    // template parameter name like `T` in `T get(T)(T data)` appears three
+    // times, only one of which is the parameter itself.
+    int labelStart = -1;
+    int labelEnd = -1;
 
     // The human-readable doc-comment of this parameter.
     string documentation; // (Optional)

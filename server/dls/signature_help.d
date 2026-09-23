@@ -60,9 +60,25 @@ void lsp_signature_help(int id, JsonNode * params_json) {
         // Add parameter information so the editor knows where to highlight
         auto parameters = json.add_array_to_object(sigItem, "parameters");
         for (int j = 0; j < dcdSig.parameters.length; j++) {
+            auto dcdParam = &dcdSig.parameters[j];
             auto paramItem = json.create_object();
-            // In LSP, this label can be the exact substring within the main label
-            json.add_string_to_object(paramItem, "label", mem.dupe_add_sentinel(allocator, dcdSig.parameters[j].label).ptr);
+
+            // LSP's ParameterInformation.label is either a plain string -
+            // which the client then has to find by searching the whole
+            // signature label for that text - or an exact [start, end)
+            // offset pair into it. A parameter name that also appears
+            // elsewhere in the label (the return type, another parameter's
+            // type, a single-letter template parameter like `T` in
+            // `T get(T)(T data)`) makes that search ambiguous, so the
+            // offsets - computed against the real position in the callTip
+            // by parseParameters - are used whenever they're available.
+            if (dcdParam.labelStart >= 0 && dcdParam.labelEnd > dcdParam.labelStart) {
+                auto label = json.add_array_to_object(paramItem, "label");
+                json.add_item_to_array(label, json.create_number(dcdParam.labelStart));
+                json.add_item_to_array(label, json.create_number(dcdParam.labelEnd));
+            } else {
+                json.add_string_to_object(paramItem, "label", mem.dupe_add_sentinel(allocator, dcdParam.label).ptr);
+            }
             json.add_item_to_array(parameters, paramItem);
         }
 
