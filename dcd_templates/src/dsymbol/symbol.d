@@ -32,6 +32,7 @@ import std.bitmanip;
 
 import dsymbol.builtin.names;
 public import dsymbol.string_interning;
+import dsymbol.signature;
 
 import std.range : isOutputRange;
 
@@ -411,6 +412,40 @@ struct DSymbol
 	istring callTip;
 
 	/**
+	 * Kind-specific payload; the meaning is fixed by `kind` (and, for the
+	 * `qualifier == func` type symbols, by that qualifier).  Null when the
+	 * symbol has none.
+	 *
+	 * One payload kind exists today: a `Signature` for the symbols that carry
+	 * one -- `functionName` (functions, constructors, destructors, function
+	 * literals), the `qualifier == func` type symbols of `T function(Args)`
+	 * types, and aggregates whose declaration has template parameters.  It is
+	 * built while the module's AST is still alive and is immutable afterwards,
+	 * so several symbols may share one (`instantiateSymbol` copies rather than
+	 * mutates).  The payload is GC-allocated and so is not freed here.
+	 *
+	 * This is what `callTip` should have been for those symbols: the string
+	 * flattened a signature that three different features wanted the parts of
+	 * back.  Read it through `signature()`, never by casting `extra` at the
+	 * call site.
+	 */
+	private void* extra;
+
+	/**
+	 * Returns: this symbol's structured signature, or null when it has none.
+	 */
+	Signature* signature() const nothrow @nogc
+	{
+		return cast(Signature*) extra;
+	}
+
+	/// ditto
+	void setSignature(Signature* signature) nothrow @nogc @safe
+	{
+		extra = signature;
+	}
+
+	/**
 	 * Used for storing information for selective renamed imports
 	 */
 	alias altFile = callTip;
@@ -585,13 +620,13 @@ struct DSymbol
 			else
 				return type.formatType("[" ~ key ~ "]" ~ suffix);
 		}
-		else if (qualifier == SymbolQualifier.func && callTip.length)
+		else if (qualifier == SymbolQualifier.func && signature() !is null)
 		{
 			// A `T function(Args)` / `T delegate(Args)` type -- not a function
 			// declaration, which the branch above formats through its return
-			// type. The suffix builder spelled the whole type into the call
-			// tip, return type included.
-			return callTip ~ suffix;
+			// type. The suffix builder spells the whole type into the
+			// signature, return type included.
+			return renderSignature(signature()).label ~ suffix;
 		}
 		else
 		{

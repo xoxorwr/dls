@@ -30,6 +30,7 @@ import dparse.ast;
 import dparse.lexer;
 
 import dsymbol.scope_;
+import dsymbol.signature;
 import dsymbol.symbol;
 import dsymbol.modulecache;
 import dsymbol.utils;
@@ -1251,6 +1252,13 @@ extern(C) export string[] dcd_hover(const(char)* filename, const(char)* content,
             {
                 value ~= sym.callTip;
             }
+            else if (auto signature = sym.signature())
+            {
+                // Nothing joined is kept for a callable any more: the line
+                // hover shows is rendered from the signature's parts, which is
+                // also where signature help reads them from.
+                value ~= renderSignature(signature).label;
+            }
             else
             {
                 if (sym.kind == CompletionKind.structName)
@@ -1550,7 +1558,7 @@ extern(C) SignatureHelpResponse dcd_get_signature(const(char)* filename, const(c
 	        DSymbol* ctorSym = null;
 	        foreach (child; resolved.opSlice())
 	        {
-	            if (child.name == internString("*constructor*") && child.callTip !is null)
+	            if (child.name == internString("*constructor*") && child.signature() !is null)
 	            {
 	                ctorSym = child;
 	                break;
@@ -1560,11 +1568,22 @@ extern(C) SignatureHelpResponse dcd_get_signature(const(char)* filename, const(c
 	        resolved = ctorSym;
 	    }
 
-	    if (resolved.callTip is null) continue;
+	    auto signature = resolved.signature();
+	    if (signature is null) continue;
 
 	    SignatureInformation sigInfo;
-	    sigInfo.label = resolved.callTip[];
-	    sigInfo.parameters = parseParameters(resolved.callTip[], isTemplateInstantiation);
+	    auto rendered = renderSignature(signature);
+	    sigInfo.label = rendered.label;
+	    // A `Name!(...)` call wants the template parameter list, a plain
+	    // `Name(...)` the value parameter list. They are separate fields now,
+	    // so the choice is a field read rather than which parenthesis pair
+	    // sorts first in a string.
+	    if (isTemplateInstantiation)
+	        sigInfo.parameters = parameterInformations(signature.templateParameters,
+	            rendered.templateSpans);
+	    else
+	        sigInfo.parameters = parameterInformations(signature.parameters,
+	            rendered.parameterSpans);
 	    response.signatures ~= sigInfo;
 	}
 
@@ -1578,97 +1597,29 @@ extern(C) SignatureHelpResponse dcd_get_signature(const(char)* filename, const(c
 }
 
 /**
- * Params:
- *     callTip = a symbol's callTip: `"T get(T)(T data)"`, `"void foo(int
- *         a)"`, `"struct TD(T) {\n    T data;\n}"`, ...
- *     wantFirstGroup = true for `Name!(...)` (a template instantiation - the
- *         template parameter list is what belongs here), false for
- *         `Name(...)` (an ordinary call - the value parameter list, or a
- *         struct/union's constructor, both already resolved to their own
- *         callTip by the caller).
+ * Turns one of a signature's parameter lists into the protocol's
+ * `ParameterInformation`s.
  *
- * A plain function/constructor callTip has exactly one top-level ('(' at
- * depth 0) parenthesized group, so `wantFirstGroup` picks the same one
- * either way. A templated *function's* callTip has two, back to back
- * (`T get(T)(T data)`: template parameters, then value parameters) - which
- * one is wanted depends on whether the call site wrote a `!`. A struct/
- * union's callTip (used only for `Name!(...)`, never a plain call - the
- * caller resolves that to the constructor's own callTip instead) has only
- * the one group before its body; a field inside that body - a function
- * pointer, say - can itself contain parens, but those sit deeper than
- * depth 0 (the body's own '{' already raised the depth), so they are never
- * mistaken for a second top-level group there.
+ * `labels` are the entries as rendered, `spans` where `renderSignature` placed
+ * them in the label: the `[start, end)` pair is what a client uses to
+ * highlight the exact occurrence dls means, instead of searching the label for
+ * text that may appear several times (a single-letter template parameter like
+ * `T` in `T get(T)(T data)`).
  */
-ParameterInformation[] parseParameters(string callTip, bool wantFirstGroup = false)
+ParameterInformation[] parameterInformations(const(istring)[] labels, size_t[2][] spans)
 {
     ParameterInformation[] params;
-
-    static struct Group { size_t open; size_t close; }
-    Group[] groups;
-    size_t groupStart = size_t.max;
-    int groupDepth = 0;
-    foreach (i, c; callTip)
+    foreach (i, label; labels)
     {
-        if (c == '(' || c == '[' || c == '{' || c == '<')
-        {
-            if (groupDepth == 0 && c == '(')
-                groupStart = i;
-            groupDepth++;
-        }
-        else if (c == ')' || c == ']' || c == '}' || c == '>')
-        {
-            groupDepth--;
-            if (groupDepth == 0 && groupStart != size_t.max)
-            {
-                groups ~= Group(groupStart, i);
-                groupStart = size_t.max;
-            }
-        }
-    }
-    if (groups.length == 0) return params;
-
-    auto group = wantFirstGroup ? groups[0] : groups[$ - 1];
-    auto paramStr = callTip[group.open + 1 .. group.close];
-    if (paramStr.length == 0) return params;
-
-    // 'localStart .. localEnd' is trimmed of surrounding whitespace but
-    // still an offset into 'paramStr' - 'group.open + 1 +' turns that into
-    // the absolute offset into 'callTip' the client needs for the
-    // [start, end] label.
-    void addParam(size_t localStart, size_t localEnd)
-    {
-        while (localStart < localEnd
-            && (paramStr[localStart] == ' ' || paramStr[localStart] == '\t'))
-            localStart++;
-        while (localEnd > localStart
-            && (paramStr[localEnd - 1] == ' ' || paramStr[localEnd - 1] == '\t'))
-            localEnd--;
-        if (localEnd <= localStart) return;
-
         ParameterInformation info;
-        info.label = paramStr[localStart .. localEnd];
-        info.labelStart = cast(int)(group.open + 1 + localStart);
-        info.labelEnd = cast(int)(group.open + 1 + localEnd);
+        info.label = label.data;
+        if (i < spans.length)
+        {
+            info.labelStart = cast(int) spans[i][0];
+            info.labelEnd = cast(int) spans[i][1];
+        }
         params ~= info;
     }
-
-    int depth = 0;
-    size_t start = 0;
-    for (size_t i = 0; i < paramStr.length; i++)
-    {
-        auto c = paramStr[i];
-        if (c == '(' || c == '[' || c == '{' || c == '<')
-            depth++;
-        else if (c == ')' || c == ']' || c == '}' || c == '>')
-            depth--;
-        else if (c == ',' && depth == 0)
-        {
-            addParam(start, i);
-            start = i + 1;
-        }
-    }
-    addParam(start, paramStr.length);
-
     return params;
 }
 struct SignatureHelpResponse {

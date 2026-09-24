@@ -43,6 +43,7 @@ import dsymbol.builtin.symbols;
 import dsymbol.conversion;
 import dsymbol.modulecache;
 import dsymbol.scope_;
+import dsymbol.signature;
 import dsymbol.string_interning;
 import dsymbol.symbol;
 //import dsymbol.ufcs;
@@ -1461,7 +1462,10 @@ void setCompletions(T)(ref AutocompleteResponse response, ref ModuleCache cache,
 		response.completionType = CompletionType.calltips;
 		foreach (symbol; symbols)
 		{
-			if (symbol.kind != CompletionKind.aliasName && symbol.callTip !is null)
+			// A callable has a signature, an aggregate its rendered body;
+			// either is something to show, an alias is not.
+			if (symbol.kind != CompletionKind.aliasName
+				&& (symbol.signature() !is null || symbol.callTip !is null))
 			{
 				auto completion = makeSymbolCompletionInfo(symbol, char.init);
 				// TODO: put return type

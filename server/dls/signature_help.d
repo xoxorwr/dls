@@ -70,8 +70,8 @@ void lsp_signature_help(int id, JsonNode * params_json) {
             // elsewhere in the label (the return type, another parameter's
             // type, a single-letter template parameter like `T` in
             // `T get(T)(T data)`) makes that search ambiguous, so the
-            // offsets - computed against the real position in the callTip
-            // by parseParameters - are used whenever they're available.
+            // offsets - recorded while dcd rendered the signature line it
+            // put in `label` - are used whenever they're available.
             if (dcdParam.labelStart >= 0 && dcdParam.labelEnd > dcdParam.labelStart) {
                 auto label = json.add_array_to_object(paramItem, "label");
                 json.add_item_to_array(label, json.create_number(dcdParam.labelStart));

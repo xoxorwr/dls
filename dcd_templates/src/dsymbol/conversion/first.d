@@ -29,6 +29,7 @@ import dsymbol.import_;
 import dsymbol.modulecache;
 import dsymbol.scope_;
 import dsymbol.semantic;
+import dsymbol.signature;
 import dsymbol.string_interning;
 import dsymbol.symbol;
 import dsymbol.type_lookup;
@@ -109,32 +110,35 @@ final class FirstPass : ASTVisitor
 
 	override void visit(const Constructor con)
 	{
-		visitConstructor(con.location, con.parameters, con.templateParameters, con.functionBody, con.comment);
+		visitConstructor(con.location, con.parameters, con.templateParameters,
+			con.functionBody, con.comment, con.memberFunctionAttributes);
 	}
 
 	override void visit(const SharedStaticConstructor con)
 	{
-		visitConstructor(con.location, null, null, con.functionBody, con.comment);
+		visitConstructor(con.location, null, null, con.functionBody, con.comment,
+			con.memberFunctionAttributes);
 	}
 
 	override void visit(const StaticConstructor con)
 	{
-		visitConstructor(con.location, null, null, con.functionBody, con.comment);
+		visitConstructor(con.location, null, null, con.functionBody, con.comment,
+			con.memberFunctionAttributes);
 	}
 
 	override void visit(const Destructor des)
 	{
-		visitDestructor(des.index, des.functionBody, des.comment);
+		visitDestructor(des.index, des.functionBody, des.comment, des.memberFunctionAttributes);
 	}
 
 	override void visit(const SharedStaticDestructor des)
 	{
-		visitDestructor(des.location, des.functionBody, des.comment);
+		visitDestructor(des.location, des.functionBody, des.comment, des.memberFunctionAttributes);
 	}
 
 	override void visit(const StaticDestructor des)
 	{
-		visitDestructor(des.location, des.functionBody, des.comment);
+		visitDestructor(des.location, des.functionBody, des.comment, des.memberFunctionAttributes);
 	}
 
 
@@ -219,13 +223,15 @@ final class FirstPass : ASTVisitor
 			pushFunctionScope(dec.functionBody, start);
 			scope (exit) popScope();
 			processParameters(currentSymbol, dec.returnType,
-					currentSymbol.acSymbol.name, dec.parameters, dec.templateParameters);
+					currentSymbol.acSymbol.name, dec.parameters, dec.templateParameters,
+					leadingAttributes(dec.attributes), dec.memberFunctionAttributes);
 			dec.functionBody.accept(this);
 		}
 		else
 		{
 			processParameters(currentSymbol, dec.returnType,
-					currentSymbol.acSymbol.name, dec.parameters, dec.templateParameters);
+					currentSymbol.acSymbol.name, dec.parameters, dec.templateParameters,
+					leadingAttributes(dec.attributes), dec.memberFunctionAttributes);
 		}
 
 		if (dec.returnType !is null){
@@ -265,7 +271,8 @@ final class FirstPass : ASTVisitor
 		pushScope(block.startLocation, block.endLocation);
 		scope (exit) popScope();
 		processParameters(currentSymbol, exp.returnType,
-				FUNCTION_LITERAL_SYMBOL_NAME, exp.parameters, null);
+				FUNCTION_LITERAL_SYMBOL_NAME, exp.parameters, null,
+				null, exp.memberFunctionAttributes);
 		block.accept(this);
 	}
 
@@ -548,6 +555,13 @@ final class FirstPass : ASTVisitor
 			protection.addScope(dec.attributeDeclaration.attribute.attribute.type);
 			return;
 		}
+		// Leading attributes (`pure nothrow @safe int f()`) are consumed into
+		// the *Declaration* node and only forwarded to the declaration itself
+		// for some shapes, so the enclosed function has to read them here.
+		auto savedDeclarationAttributes = declarationAttributes;
+		declarationAttributes = dec.attributes;
+		scope(exit) declarationAttributes = savedDeclarationAttributes;
+
 		IdType p;
 		foreach (const Attribute attr; dec.attributes)
 		{
@@ -1040,17 +1054,12 @@ private:
 
 		// ctor
 		{
-			auto app = appender!string();
-			app.put("this(");
-			bool first = true;
+			istring[] parameters;
 			foreach (field; zip(structFieldTypes[], structFieldNames[], structFieldStatic[]))
 			{
 				if (field[2] == true) continue;
 
-				if (first)
-					first = false;
-				else
-					app.put(", ");
+				auto app = appender!string();
 				if (field[0] is null)
 					app.put("auto ");
 				else
@@ -1059,11 +1068,15 @@ private:
 					app.put(" ");
 				}
 				app.put(field[1].data);
+				parameters ~= istring(app.data);
 			}
-			app.put(")");
 			SemanticSymbol* symbol = allocateSemanticSymbol(CONSTRUCTOR_SYMBOL_NAME,
 				CompletionKind.functionName, symbolFile, currentSymbol.acSymbol.location);
-			symbol.acSymbol.callTip = istring(app.data);
+			auto signature = GCAllocator.instance.make!Signature();
+			signature.shape = SignatureShape.callable;
+			signature.name = THIS_SYMBOL_NAME;
+			signature.parameters = parameters;
+			symbol.acSymbol.setSignature(signature);
 			symbol.acSymbol.generated = true;
 			currentSymbol.addChild(symbol, true);
 		}
@@ -1084,8 +1097,8 @@ private:
 		}
 
 		app.put(currentSymbol.acSymbol.name.data);
-		if (currentAggregateTemplateParameters !is null)
-			app.formatNode(currentAggregateTemplateParameters);
+		if (auto signature = currentSymbol.acSymbol.signature())
+			app.put(renderParenthesized(signature.templateParameters));
 		app.put(" {\n");
 		foreach (field; zip(structFieldTypes[], structFieldNames[], structFieldStatic[]))
 		{
@@ -1248,9 +1261,21 @@ private:
 		scope (exit) protection.endScope();
 		processTemplateParameters(currentSymbol, dec.templateParameters);
 
-		auto savedAggregateTemplateParameters = currentAggregateTemplateParameters;
-		currentAggregateTemplateParameters = dec.templateParameters;
-		scope(exit) currentAggregateTemplateParameters = savedAggregateTemplateParameters;
+		// The declaration's template parameter list, kept structurally: it is
+		// what `createCallTip` spells into the struct body's head, what a
+		// `Name!(...)` signature hint shows, and what a struct/class
+		// completion's detail is built from.  Only templated aggregates get
+		// one -- a plain `struct Foo` has nothing structured to say.
+		if (auto templateParameters = dec.templateParameters)
+			if (templateParameters.templateParameterList !is null
+				&& templateParameters.templateParameterList.items.length > 0)
+			{
+				auto signature = GCAllocator.instance.make!Signature();
+				signature.shape = SignatureShape.templateList;
+				signature.name = currentSymbol.acSymbol.name;
+				signature.templateParameters = renderTemplateParameters(templateParameters);
+				currentSymbol.acSymbol.setSignature(signature);
+			}
 
 		dec.accept(this);
 	}
@@ -1304,7 +1329,8 @@ private:
 
 	void visitConstructor(size_t location, const Parameters parameters,
 		const TemplateParameters templateParameters,
-		const FunctionBody functionBody, string doc)
+		const FunctionBody functionBody, string doc,
+		const(MemberFunctionAttribute)[] attributes = null)
 	{
 		SemanticSymbol* symbol = allocateSemanticSymbol(CONSTRUCTOR_SYMBOL_NAME,
 			CompletionKind.functionName, symbolFile, location);
@@ -1322,25 +1348,32 @@ private:
 			pushFunctionScope(functionBody, location + 4); // 4 == "this".length
 			scope(exit) popScope();
 			currentSymbol = symbol;
-			processParameters(symbol, null, THIS_SYMBOL_NAME, parameters, templateParameters);
+			processParameters(symbol, null, THIS_SYMBOL_NAME, parameters,
+				templateParameters, declarationAttributes, attributes);
 			functionBody.accept(this);
 			currentSymbol = currentSymbol.parent;
 		}
 		else
 		{
 			currentSymbol = symbol;
-			processParameters(symbol, null, THIS_SYMBOL_NAME, parameters, templateParameters);
+			processParameters(symbol, null, THIS_SYMBOL_NAME, parameters,
+				templateParameters, declarationAttributes, attributes);
 			currentSymbol = currentSymbol.parent;
 		}
 	}
 
-	void visitDestructor(size_t location, const FunctionBody functionBody, string doc)
+	void visitDestructor(size_t location, const FunctionBody functionBody, string doc,
+		const(MemberFunctionAttribute)[] attributes = null)
 	{
 		SemanticSymbol* symbol = allocateSemanticSymbol(DESTRUCTOR_SYMBOL_NAME,
 			CompletionKind.functionName, symbolFile, location);
 		symbol.parent = currentSymbol;
 		currentSymbol.addChild(symbol, true);
-		symbol.acSymbol.callTip = internString("~this()");
+		auto signature = GCAllocator.instance.make!Signature();
+		signature.shape = SignatureShape.callable;
+		signature.name = DESTRUCTOR_SYMBOL_NAME;
+		signature.attributes = renderAttributes(declarationAttributes, attributes);
+		symbol.acSymbol.setSignature(signature);
 		symbol.acSymbol.protection = protection.current;
 		symbol.acSymbol.doc = makeDocumentation(doc);
 
@@ -1360,7 +1393,9 @@ private:
 
 	void processParameters(SemanticSymbol* symbol, const Type returnType,
 		string functionName, const Parameters parameters,
-		const TemplateParameters templateParameters)
+		const TemplateParameters templateParameters,
+		const(Attribute)[] leadingAttributes = null,
+		const(MemberFunctionAttribute)[] memberAttributes = null)
 	{
 		processTemplateParameters(symbol, templateParameters);
 		if (parameters !is null)
@@ -1444,8 +1479,9 @@ private:
 				currentScope.addSymbol(arguments.acSymbol, false);
 			}
 		}
-		symbol.acSymbol.callTip = formatCallTip(returnType, functionName,
-			parameters, templateParameters);
+		symbol.acSymbol.setSignature(makeCallableSignature(returnType,
+			functionName, parameters, templateParameters, leadingAttributes,
+			memberAttributes));
 	}
 
 	void processTemplateParameters(SemanticSymbol* symbol, const TemplateParameters templateParameters)
@@ -1525,24 +1561,120 @@ private:
 		}
 	}
 
-	istring formatCallTip(const Type returnType, string name,
-		const Parameters parameters, const TemplateParameters templateParameters)
+	/**
+	 * Builds the structured signature of a callable while its declaration
+	 * node is still alive.
+	 *
+	 * This is where `formatCallTip` used to join return type, name, template
+	 * parameters and value parameters into one string that every consumer
+	 * then took apart again.  The parts are rendered with the same formatter,
+	 * so the line they compose is unchanged; they just stay addressable.
+	 */
+	Signature* makeCallableSignature(const Type returnType, string name,
+		const Parameters parameters, const TemplateParameters templateParameters,
+		const(Attribute)[] leadingAttributes,
+		const(MemberFunctionAttribute)[] memberAttributes = null)
 	{
+		auto signature = GCAllocator.instance.make!Signature();
+		signature.shape = SignatureShape.callable;
+		signature.name = istring(name);
+		signature.returnType = renderNode(returnType);
+		signature.attributes = renderAttributes(leadingAttributes, memberAttributes);
+		signature.templateParameters = renderTemplateParameters(templateParameters);
+		signature.parameters = renderParameters(parameters);
+		return signature;
+	}
 
+	/// Renders a single node with the same formatter the call tip used.
+	private istring renderNode(T)(const T node)
+	{
+		if (node is null)
+			return istring.init;
 		auto app = appender!string();
-		if (returnType !is null)
-		{
-			app.formatNode(returnType);
-			app.put(' ');
-		}
-		app.put(name);
-		if (templateParameters !is null)
-			app.formatNode(templateParameters);
+		formatNode(app, node);
+		return app.data.length > 0 ? istring(app.data) : istring.init;
+	}
+
+	/**
+	 * Renders the value parameter list, one entry per parameter.
+	 *
+	 * `format(P parameters)` in dparse spells the list as its entries joined
+	 * with `", "` -- including the trailing `...` of a variadic declaration --
+	 * so rendering each entry here reproduces that text exactly, and the
+	 * entry boundaries are known without looking for top-level commas.
+	 */
+	private istring[] renderParameters(const Parameters parameters)
+	{
+		istring[] rendered;
 		if (parameters is null)
-			app.put("()");
-		else
-			app.formatNode(parameters);
-		return istring(app.data);
+			return rendered;
+		foreach (const Parameter p; parameters.parameters)
+			rendered ~= renderNode(p);
+		if (parameters.hasVarargs)
+			rendered ~= istring("...");
+		return rendered;
+	}
+
+	/// ditto, for a `(T, U)` template parameter list.
+	private istring[] renderTemplateParameters(const TemplateParameters templateParameters)
+	{
+		istring[] rendered;
+		if (templateParameters is null || templateParameters.templateParameterList is null)
+			return rendered;
+		foreach (const TemplateParameter p; templateParameters.templateParameterList.items)
+			rendered ~= renderNode(p);
+		return rendered;
+	}
+
+	/**
+	 * Renders a declaration's function attributes (`pure`, `nothrow`, `@safe`,
+	 * `@nogc`, a UDA).  These were simply absent from the call tip: it never
+	 * looked at them, so they could not even be reverse-engineered out of it.
+	 *
+	 * A leading attribute is kept only when it cannot be a type constructor:
+	 * `pure`/`nothrow` and the `@`-form are function attributes wherever they
+	 * appear, but `const int f()` declares a const *return type* while
+	 * `int f() const` declares a const *method*, and libdparse hands both to
+	 * the declaration as attributes.  Trailing ones are unambiguous.
+	 */
+	private istring[] renderAttributes(const(Attribute)[] leading,
+		const(MemberFunctionAttribute)[] trailing)
+	{
+		istring[] rendered;
+		foreach (const attribute; leading)
+		{
+			if (attribute is null)
+				continue;
+			if (attribute.atAttribute is null
+				&& attribute.attribute.type != tok!"pure"
+				&& attribute.attribute.type != tok!"nothrow")
+				continue;
+			auto text = renderNode(attribute);
+			if (text.length > 0)
+				rendered ~= text;
+		}
+		foreach (const attribute; trailing)
+		{
+			if (attribute is null)
+				continue;
+			auto text = renderNode(attribute);
+			if (text.length > 0)
+				rendered ~= text;
+		}
+		return rendered;
+	}
+
+	/**
+	 * The attributes written before a declaration's return type.
+	 *
+	 * libdparse consumes them into the enclosing `Declaration` and forwards
+	 * them to the declaration itself only for some shapes, so the common
+	 * `pure nothrow @safe int f()` leaves `FunctionDeclaration.attributes`
+	 * empty and spells them on the `Declaration` this pass is inside of.
+	 */
+	private const(Attribute)[] leadingAttributes(const(Attribute)[] own)
+	{
+		return own.length > 0 ? own : declarationAttributes;
 	}
 
 	void populateInitializer(T)(SemanticSymbol* symbol, const T initializer,
@@ -1668,12 +1800,9 @@ private:
 	/// Last comment for ditto-ing
 	istring lastComment;
 
-	/// The template parameter list of the struct/union currently being
-	/// visited (`(T)` in `struct TD(T)`), read by `createCallTip()` once it
-	/// reaches the closing brace - saved/restored the same way `lastComment`
-	/// is, so a struct nested inside a templated one sees its own list, not
-	/// the enclosing one's.
-	Rebindable!(const TemplateParameters) currentAggregateTemplateParameters;
+	/// Attributes of the `Declaration` node currently being visited; see
+	/// `leadingAttributes`.
+	const(Attribute)[] declarationAttributes;
 
 	const Module mod;
 

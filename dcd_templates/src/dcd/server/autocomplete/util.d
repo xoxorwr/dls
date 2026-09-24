@@ -37,6 +37,7 @@ import dsymbol.conversion.second : BinaryKind, binaryResultTypeName, hasTemplate
 	instantiateWithArguments, promotedScalarName, typeSwap;
 import dsymbol.modulecache;
 import dsymbol.scope_;
+import dsymbol.signature;
 import dsymbol.string_interning;
 import dsymbol.symbol;
 //import dsymbol.ufcs;
@@ -1090,34 +1091,25 @@ AutocompleteResponse.Completion makeSymbolCompletionInfo(const DSymbol* symbol, 
 		ret.definition = symbol.name; // TODO: add enum value to definition string
 	else if (kind == CompletionKind.structName || kind == CompletionKind.className)
 	{
-		import std.array : array;
-
-		string newName;
-		// opSlice() walks the symbol's `parts` (a lookup-oriented container,
-		// not an ordered list), so it does not hand these back in the order
-		// they were declared - sorted by `location` (source byte offset)
-		// puts `Pair(K, V)` back the right way round instead of `Pair(V, K)`.
-		auto typeParams = symbol.opSlice()
-			.filter!(part => part.kind == CompletionKind.typeTmpParam)
-			.array;
-		typeParams.sort!((a, b) => a.location < b.location);
-		if (typeParams.length > 0)
-		{
-			newName = symbol.name ~ "(";
-			foreach(i, part; typeParams)
-			{
-				newName ~= part.name;
-				if (i + 1 < typeParams.length)
-					newName ~= ", ";
-			}
-			newName ~= ")";
-		}
+		// `Name(Params)` for a templated aggregate - the parameter list as it
+		// was declared, so a constrained (`T : Base`) or value (`int N`)
+		// parameter comes out whole, in declaration order, without the
+		// body.  A non-templated one keeps its rendered body, which is what
+		// a completion detail shows instead.
+		auto signature = symbol.signature();
+		if (signature !is null && signature.templateParameters.length > 0)
+			ret.definition = symbol.name.data ~ renderParenthesized(signature.templateParameters);
 		else
-			newName = symbol.callTip;
-		ret.definition = newName;
+			ret.definition = symbol.callTip;
 	}
 	else
-		ret.definition = symbol.callTip;
+	{
+		// A callable's `definition` is its signature, rendered from the parts
+		// the old call tip had been joined from.
+		auto signature = symbol.signature();
+		ret.definition = signature !is null
+			? renderSignature(signature).label : symbol.callTip;
+	}
 
 	// TODO: extend completion with more info such as class inheritance
 

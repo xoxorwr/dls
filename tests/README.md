@@ -35,6 +35,7 @@ far the most expensive part of a run.
 | `test_definition.py` | `textDocument/definition` |
 | `test_document_symbols.py` | outline symbols, kinds, ranges |
 | `test_signature_help.py` | overloads, parameters, active parameter |
+| `test_calltip_signatures.py` | the structured signature: attributes, template parameter lists, instantiation substitution, calltip completion |
 | `test_semantic_tokens.py` | the token legend and the tokens of a file |
 | `test_semantic_tokens_refresh.py` | tokens that depend on an imported module, `workspace/semanticTokens/refresh` |
 | `test_cancellation.py` | `$/cancelRequest`, `ContentModified` for superseded tokens, message framing |

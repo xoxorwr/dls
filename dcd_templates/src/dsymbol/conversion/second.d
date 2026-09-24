@@ -19,6 +19,7 @@
 module dsymbol.conversion.second;
 
 import dsymbol.semantic;
+import dsymbol.signature;
 import dsymbol.string_interning;
 import dsymbol.symbol;
 import dsymbol.scope_;
@@ -358,7 +359,7 @@ private bool resolveTypeFromTypeNode(const(Type) type, DSymbol* symbol, TypeLook
 	DSymbol* current = base;
 	foreach (suffix; type.typeSuffixes)
 	{
-		auto next = wrapTypeSuffix(current, suffix, type);
+		auto next = wrapTypeSuffix(current, suffix);
 		if (current is null && deferredName.length > 0)
 		{
 			next.typeSymbolName = deferredName;
@@ -730,7 +731,7 @@ private DSymbol* resolveTypeNodeValue(const(Type) type, DSymbol* symbol, Scope* 
 	{
 		if (current is null)
 			break;
-		current = wrapTypeSuffix(current, suffix, type);
+		current = wrapTypeSuffix(current, suffix);
 	}
 	return current;
 }
@@ -1797,11 +1798,9 @@ void resolveType(DSymbol* symbol, ref TypeLookups typeLookups,
 /**
  * Builds the suffix symbol for one `TypeSuffix`, the way the crumb walk
  * builds it (`resolveTypeFromType`'s suffix branch): same marker, same
- * qualifier, same children, same call tip.  `wholeType` is the sum of the
- * current type and its suffixes -- it is the spelling a `delegate`/`function`
- * suffix renders as its call tip.
+ * qualifier, same children, same signature.
  */
-private DSymbol* wrapTypeSuffix(DSymbol* inner, const(TypeSuffix) suffix, const(Type) wholeType)
+private DSymbol* wrapTypeSuffix(DSymbol* inner, const(TypeSuffix) suffix)
 {
 	if (suffix.type !is null)
 		return wrapTypeSymbol(ASSOC_ARRAY_SYMBOL_NAME, SymbolQualifier.assocArray, inner,
@@ -1818,12 +1817,44 @@ private DSymbol* wrapTypeSuffix(DSymbol* inner, const(TypeSuffix) suffix, const(
 			CompletionKind.dummy, inner);
 		next.qualifier = SymbolQualifier.func;
 		next.ownType = false;
-		next.callTip = renderNode(wholeType);
+		next.setSignature(makeFunctionTypeSignature(inner, suffix));
 		return next;
 	}
 	// An unmodelled suffix (`[Type]` selected out of a template argument list,
 	// ...): keep the base type rather than inventing one.
 	return inner;
+}
+
+/**
+ * Builds the signature of a `T function(Args)` / `T delegate(Args)` type.
+ *
+ * `inner` is the symbol the type's preceding pieces built, so its rendering
+ * *is* the return type; the suffix supplies the `function`/`delegate` keyword
+ * and the value parameter list.  This used to be the whole type re-rendered
+ * from the AST into one string (`renderNode(wholeType)`) which signature help
+ * then split apart again to find the parameters of a call through a function
+ * pointer.
+ */
+private Signature* makeFunctionTypeSignature(DSymbol* inner, const(TypeSuffix) suffix)
+{
+	auto signature = GCAllocator.instance.make!Signature();
+	signature.shape = SignatureShape.functionType;
+	signature.functionKind = internString(suffix.delegateOrFunction.text.length > 0
+		? suffix.delegateOrFunction.text : str(suffix.delegateOrFunction.type));
+	if (inner !is null)
+	{
+		auto text = inner.formatType();
+		if (text.length > 0)
+			signature.returnType = internString(text);
+	}
+	if (suffix.parameters !is null)
+	{
+		foreach (const Parameter p; suffix.parameters.parameters)
+			signature.parameters ~= renderNode(p);
+		if (suffix.parameters.hasVarargs)
+			signature.parameters ~= internString("...");
+	}
+	return signature;
 }
 
 /// The `[K]` of an associative array suffix, spelled the way `addTypeToLookups`
@@ -2238,6 +2269,7 @@ private DSymbol* instantiateAggregate(DSymbol* s, DSymbol*[] args, istring[] arg
 	instantiated.location_end = s.location_end;
 	instantiated.doc = s.doc;
 	instantiated.callTip = s.callTip;
+	instantiated.setSignature(s.signature());
 	instantiated.flags = s.flags;
 
 	// Remember what this instance stands for, so a later instantiation can
@@ -2333,11 +2365,14 @@ private DSymbol* instantiateAggregate(DSymbol* s, DSymbol*[] args, istring[] arg
 			newPart.doc = part.doc;
 			newPart.callTip = part.callTip;
 			newPart.flags = part.flags;
-			// The call tip is display text built while parsing, from the
-			// *generic* declaration (`V get(K key)`); now that this copy's
-			// return type is concrete, its leading type has to follow.
+			// The signature was built while parsing, from the *generic*
+			// declaration (`V get(K key)`); now that this copy's return type
+			// is concrete, its leading type has to follow.
 			if (part.kind == CompletionKind.functionName)
-				newPart.callTip = substituteCallTipReturnType(part.callTip, part.type, newPartType);
+				newPart.setSignature(substituteSignatureReturnType(part.signature(),
+					part.type, newPartType));
+			else
+				newPart.setSignature(part.signature());
 			instantiated.addChild(newPart, true);
 		}
 		else
@@ -2430,26 +2465,32 @@ private string argumentName(const DSymbol* arg)
 }
 
 /**
- * Replaces the return type at the head of a call tip.
+ * Returns a copy of a signature whose return type is replaced.
  *
- * `formatCallTip` renders a call tip from the *generic* declaration
- * (`V get(K key)`), so a completion description built from it would keep
+ * The signature was built from the *generic* declaration (`V get(K key)`), so
+ * a completion description or signature hint built from it would keep
  * advertising the parameter of an instance whose return type is concrete.
- * Only the leading type is replaced, and only when the call tip really starts
- * with the old type's rendering; the parameter list is left as written.
+ * Only the return type is replaced, and only when it really is the old type's
+ * rendering; the parameter lists are left as written.
+ *
+ * The original is not mutated: `signature` may be shared with the symbol it
+ * came from (the generic declaration, or another instance).
  */
-private istring substituteCallTipReturnType(istring callTip, const DSymbol* oldType,
-	const DSymbol* newType)
+private Signature* substituteSignatureReturnType(const Signature* signature,
+	const DSymbol* oldType, const DSymbol* newType)
 {
-	if (callTip.length == 0 || oldType is null || newType is null)
-		return callTip;
+	auto unchanged = cast(Signature*) signature;
+	if (signature is null || signature.returnType.length == 0
+		|| oldType is null || newType is null)
+		return unchanged;
 	auto written = oldType.formatType();
 	auto replacement = newType.formatType();
 	if (written.length == 0 || replacement.length == 0 || written == replacement)
-		return callTip;
-	auto text = callTip.data;
-	if (text.length <= written.length || text[written.length] != ' '
-		|| text[0 .. written.length] != written)
-		return callTip;
-	return istring(replacement ~ text[written.length .. $]);
+		return unchanged;
+	if (signature.returnType.data != written)
+		return unchanged;
+	auto substituted = GCAllocator.instance.make!Signature();
+	*substituted = *cast(Signature*) signature;
+	substituted.returnType = internString(replacement);
+	return substituted;
 }

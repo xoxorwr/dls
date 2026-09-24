@@ -138,14 +138,10 @@ void lsp_completion(int id, JsonNode * params_json) {
             // A templated struct/class's definition is just "Name(Params)"
             // with no body at all (see makeSymbolCompletionInfo's
             // structName/className branch) - unlike a non-templated one,
-            // whose definition is the whole callTip body, so there is no
-            // '{' to find and bracketI stays -1. A template parameter that
-            // isn't a plain type (`T : Base`, a value parameter like
-            // `int N`) falls back to that full callTip instead (its type
-            // param list is empty - see makeSymbolCompletionInfo), which
-            // *does* have a body, so detail has to stop at the parameter
-            // list's own closing paren, not run to the end of the string,
-            // or it drags the whole body along with it.
+            // whose definition is its rendered body, so there is no '('
+            // before the '{' and this stays empty. The parameter list still
+            // has to be closed by bracket matching: it is the one piece of
+            // the definition whose own parens may be nested.
             if (firstParenI > 0 && (bracketI < 0 || firstParenI < bracketI))
             {
                 int depth = 0;
