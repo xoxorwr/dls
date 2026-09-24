@@ -312,6 +312,86 @@ extern(C) export DSymbolInfo[] dcd_document_symbols(const(char)* filename, const
     return ret;
 }
 
+struct DWorkspaceSymbolInfo
+{
+    string name;
+    ubyte kind;
+    string file;
+    size_t location;
+}
+
+/**
+ * Answers `workspace/symbol`: every project symbol whose name contains
+ * 'query' (case-insensitive), across every module under 'projectPaths'.
+ *
+ * Scanning is scoped to 'projectPaths' (see 'ModuleCache.getWorkspaceSymbols')
+ * so this does not force-parse the compiler's own stdlib import paths - only
+ * whatever the caller already registered as the project's own paths.
+ * Recursion into a symbol's children stops at anything that is not itself a
+ * container (struct/class/interface/union/enum/template/module), so a
+ * function's parameters and locals never show up as separate results.
+ */
+extern(C) export DWorkspaceSymbolInfo[] dcd_workspace_symbols(string query, string[] projectPaths)
+{
+    import std.algorithm.searching : canFind;
+    import std.uni : toLower;
+    import dsymbol.modulecache;
+
+    DWorkspaceSymbolInfo[] ret;
+
+    if (query.length == 0 || projectPaths.length == 0)
+        return ret;
+
+    bool inProject(string file)
+    {
+        foreach (p; projectPaths)
+            if (file.length > p.length && file[0 .. p.length] == p)
+                return true;
+        return false;
+    }
+
+    bool isContainer(CompletionKind k)
+    {
+        switch (k)
+        {
+            case CompletionKind.className:
+            case CompletionKind.interfaceName:
+            case CompletionKind.structName:
+            case CompletionKind.unionName:
+            case CompletionKind.enumName:
+            case CompletionKind.templateName:
+            case CompletionKind.mixinTemplateName:
+            case CompletionKind.moduleName:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    auto needle = query.toLower();
+
+    void walk(DSymbol* it)
+    {
+        foreach (sym; it.opSlice())
+        {
+            if (sym.generated) continue;
+            if (!isPublicCompletionKind(sym.kind)) continue;
+            if (!inProject(sym.symbolFile)) continue;
+
+            if (sym.name.length && sym.name.toLower().canFind(needle))
+                ret ~= DWorkspaceSymbolInfo(sym.name.idup, cast(ubyte) sym.kind, sym.symbolFile.idup, sym.location);
+
+            if (isContainer(sym.kind))
+                walk(sym);
+        }
+    }
+
+    foreach (entry; cache.getWorkspaceSymbols(projectPaths))
+        walk(entry.symbol);
+
+    return ret;
+}
+
 /**
  * One semantic token: the byte range in the file a client should colour, and
  * what it is.  `type` and `modifiers` are indices into the legend the client

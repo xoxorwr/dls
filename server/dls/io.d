@@ -62,8 +62,15 @@ void drop_semantic_tokens(mem.Allocator alloc, ref BUFFER buffer) {
 /// Forgets the cached unused-symbol list of 'buffer' - same two uses as
 /// 'drop_semantic_tokens' above, for the unused-import/parameter cache.
 void drop_unused_symbols(mem.Allocator alloc, ref BUFFER buffer) {
-    if (buffer.unused_symbols.length > 0)
+    if (buffer.unused_symbols.length > 0) {
+        // Each entry's 'name' is its own separate allocation (see
+        // 'document_unused_symbols' in unused_diagnostics.d) - freeing just
+        // the outer array would leak every name still referenced by it.
+        foreach (ref s; buffer.unused_symbols)
+            if (s.name.length > 0)
+                alloc.free(cast(char[]) s.name);
         alloc.free(buffer.unused_symbols);
+    }
     buffer.unused_symbols = null;
     buffer.unused_symbols_valid = false;
 }

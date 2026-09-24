@@ -524,6 +524,9 @@ class LspClient:
     def document_symbols(self, uri: str) -> list[dict[str, Any]]:
         return self.request("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
 
+    def workspace_symbols(self, query: str) -> list[dict[str, Any]]:
+        return self.request("workspace/symbol", {"query": query})
+
     def signature_help(self, uri: str, line: int, character: int) -> dict[str, Any]:
         return self.request(
             "textDocument/signatureHelp", self._position_params(uri, line, character)

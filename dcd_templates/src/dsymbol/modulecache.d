@@ -661,6 +661,30 @@ struct ModuleCache
 		return cache[];
 	}
 
+	/**
+	 * Like 'getAllSymbols', but only force-parses import paths listed in
+	 * 'paths' (an exact match against a path as it was registered with
+	 * 'addImportPaths') instead of every registered import path.
+	 *
+	 * This exists for workspace-wide symbol search: scanning *every* import
+	 * path unconditionally would also eagerly parse the compiler's own
+	 * stdlib paths (phobos/druntime), which are typically registered
+	 * alongside the project's own paths and dwarf them in file count. The
+	 * cache has no eviction, so that cost is permanent for the process's
+	 * lifetime - callers pass just the caller's own project paths to keep
+	 * that cost bounded to the project, and let stdlib symbols keep being
+	 * cached lazily (via normal import resolution) as they already are.
+	 *
+	 * The returned range still includes whatever else is already cached
+	 * (e.g. stdlib modules pulled in earlier by ordinary import
+	 * resolution) - only the *scanning* is scoped, not the result.
+	 */
+	auto getWorkspaceSymbols(const string[] paths)
+	{
+		scanMatching((const ref ImportPath ip) => paths.canFind(ip.path));
+		return cache[];
+	}
+
 	alias DeferredSymbols = UnrolledList!(DeferredSymbol*, DeferredSymbolsAllocator);
 	DeferredSymbols deferredSymbols;
 
@@ -706,9 +730,19 @@ private:
 
 	void scanAll()
 	{
+		scanMatching((const ref ImportPath ip) => true);
+	}
+
+	/// 'scanAll', but an import path is force-parsed only when 'pred'
+	/// accepts it; one 'pred' rejects is left unscanned (not marked
+	/// 'scanned'), so a later, less restrictive scan can still pick it up.
+	void scanMatching(bool delegate(const ref ImportPath) pred)
+	{
 		foreach (ref importPath; importPaths)
 		{
 			if (importPath.scanned)
+				continue;
+			if (!pred(importPath))
 				continue;
 			scope(success) importPath.scanned = true;
 

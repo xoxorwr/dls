@@ -158,6 +158,16 @@ struct DSymbolInfo
 
 extern(C) DSymbolInfo[] dcd_document_symbols(const(char)* filename, const(char)* content);
 
+struct DWorkspaceSymbolInfo
+{
+    string name;
+    ubyte kind;
+    string file;
+    size_t location;
+}
+
+extern(C) DWorkspaceSymbolInfo[] dcd_workspace_symbols(string query, string[] projectPaths);
+
 /**
  * One semantic token: a byte range in the file, its type and its modifiers.
  * The type and the modifier bits are indices into the token legend the server

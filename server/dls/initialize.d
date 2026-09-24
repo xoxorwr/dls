@@ -32,6 +32,7 @@ void lsp_initialize(int id, JsonNode* params_json) {
             .add_bool("hoverProvider", 1)
             .add_bool("definitionProvider", 1)
             .add_bool("documentSymbolProvider", 1)
+            .add_bool("workspaceSymbolProvider", 1)
             .add_bool("codeActionProvider", 1);
 
 

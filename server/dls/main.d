@@ -19,6 +19,7 @@ import dls.initialize;
 import dls.completion;
 import dls.signature_help;
 import dls.document_symbols;
+import dls.workspace_symbols;
 import dls.definition;
 import dls.hover;
 import dls.semantic_tokens;
@@ -274,6 +275,9 @@ void handle_request(JsonNode* request) {
     }
     else if(strcmp(method, "textDocument/documentSymbol") == 0) {
       lsp_document_symbol(id, params_json);
+    }
+    else if(strcmp(method, "workspace/symbol") == 0) {
+      lsp_workspace_symbol(id, params_json);
     }
     //else if(strcmp(method, "textDocument/definition") == 0) {
     //  lsp_goto_definition(id, params_json);
@@ -894,6 +898,7 @@ ConfigReload apply_dls_json() {
 
     auto paths = keep_import_paths(projectPaths);
     bool pathsChanged = !same_import_paths(paths, g_import_paths);
+    free_import_paths(g_import_paths);
     g_import_paths = paths;
 
     if (pathsChanged)
@@ -1181,6 +1186,17 @@ string[] keep_import_paths(string[] paths) {
     }
 
     return kept[0 .. count];
+}
+
+/// Frees a list previously returned by 'keep_import_paths': each path's own
+/// buffer, then the array that held them. Called before 'g_import_paths' is
+/// replaced - every reload otherwise abandons the whole previous list.
+void free_import_paths(string[] paths) {
+    foreach (path; paths)
+        if (path.length > 0)
+            heap_allocator.free(cast(char[]) path);
+    if (paths.length > 0)
+        heap_allocator.free(paths);
 }
 
 /// True when both lists name the same directories in the same order, which is
