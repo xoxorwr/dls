@@ -12,13 +12,15 @@ to hover text (`dll.d`'s `dcd_hover`).
 
 `const`/`immutable`/`shared`/`inout` have two distinct spellings that behave
 differently: written bare (`const int x`) they are a *parameter attribute*,
-exactly like `ref` -- tracked and shown here. Written with parens
-(`const(int) x`) they are a *type constructor*, resolved (and silently
-discarded) the same way any declared type's qualifier is -- `DSymbol`'s
-resolved-type graph was never built to track qualifiers at all, which is a
-separate, structural limitation this fix does not touch (see
-`docs/problem-calltips.md`); `test_type_constructor_form_is_not_shown` pins
-that gap so it does not read as a regression later.
+exactly like `ref` -- tracked and shown here via `parameterIsConst` etc.
+Written with parens (`const(int) x`) they are a *type constructor* --
+`resolveTypeFromTypeNode` (`dsymbol/conversion/second.d`) now tracks those
+too, independently (`declaredTypeIsConst` etc., wrapped onto the type by
+`declaredTypeQualifierWrap` in `util.d`), so `test_type_constructor_form_is_not_shown`
+below now pins the qualifier being *shown*, not its absence -- see
+`tests/test_type_constructor_suffixes.py` for the fuller test coverage of
+that mechanism, including confirming these two flag families don't clobber
+each other on a parameter that combines both spellings.
 """
 
 from harness import DlsTestCase, find_item
@@ -77,13 +79,15 @@ class ParameterStorageClassHoverTests(DlsTestCase):
         self.assertIn("immutable ref int immutableRefParam;",
             self._hover_after(doc, "immutable ref int immutableRefParam"))
 
-    def test_type_constructor_form_is_not_shown(self):
+    def test_type_constructor_form_is_shown(self):
         """`const(int) x` -- the parens make this a type constructor, not a
-        parameter attribute; known gap, not what this fix covers.
+        parameter attribute; rendered in its own parenthesized form
+        (`const(int)`), not the bare-attribute prefix (`const int`) a real
+        parameter attribute would get.
         """
         doc = self.open_doc("app.d")
         text = self._hover_after(doc, "const(int) parenConstParam")
-        self.assertIn("int parenConstParam;", text)
+        self.assertIn("const(int) parenConstParam;", text)
         self.assertNotIn("const int parenConstParam", text)
 
 

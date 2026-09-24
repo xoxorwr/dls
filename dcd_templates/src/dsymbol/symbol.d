@@ -612,6 +612,19 @@ struct DSymbol
         bool parameterIsShared: 1;
         bool parameterIsInout: 1;
 
+        // The type-constructor form the comment above says isn't tracked:
+        // `const(int) x` / `immutable(int) x` / ... -- read off the
+        // *declared type*'s own `Type.typeConstructors`/`Type2.typeConstructor`
+        // by `resolveTypeFromTypeNode` (`dsymbol/conversion/second.d`) and
+        // stamped on this declaration-site symbol (not on the resolved
+        // type's wrapper-symbol chain, which is pooled/shared across
+        // unrelated declarations and would leak a qualifier onto all of
+        // them).
+        bool declaredTypeIsConst: 1;
+        bool declaredTypeIsImmutable: 1;
+        bool declaredTypeIsShared: 1;
+        bool declaredTypeIsInout: 1;
+
 	/**
 	 * True while `instantiateSymbol` rebuilds this instance.  A template that
 	 * mentions itself (`Node!T next;`) would otherwise rebuild forever: the

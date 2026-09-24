@@ -1323,10 +1323,12 @@ extern(C) export string[] dcd_hover(const(char)* filename, const(char)* content,
                         
                         string storagePrefix = parameterStorageClassPrefix(sym);
                         if (typeName.length > 0){
-                            value ~= storagePrefix ~ typeName ~ " " ~ sym.name ~ ";";
+                            value ~= storagePrefix ~ declaredTypeQualifierWrap(sym, typeName) ~ " " ~ sym.name ~ ";";
                         }
                         else{
-                            value ~= storagePrefix ~ sym.type.formatType() ~ " " ~ sym.name ~ ";";
+                            value ~= storagePrefix
+                                ~ declaredTypeQualifierWrap(sym, sym.type.formatType())
+                                ~ " " ~ sym.name ~ ";";
 
 
                         }
@@ -1356,9 +1358,9 @@ extern(C) export string[] dcd_hover(const(char)* filename, const(char)* content,
                             typeName = type.formatType();
 
                         if (typeName.length > 0)
-                            value ~= typeName;
+                            value ~= declaredTypeQualifierWrap(sym, typeName);
                         else
-                            value ~= sym.type.formatType();
+                            value ~= declaredTypeQualifierWrap(sym, sym.type.formatType());
                     }
                 }
                 else if (sym.kind == CompletionKind.enumMember)

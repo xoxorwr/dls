@@ -311,6 +311,47 @@ private istring identifierName(const(IdentifierOrTemplateInstance) ioti)
  * tree it points into (see PLAN2.md section 5), so this walker only runs while
  * the tree is alive.
  */
+/// Which type-constructor keywords (`const`/`immutable`/`shared`/`inout`)
+/// appear anywhere in a `Type`'s constructor chain: `Type.typeConstructors`
+/// for the bare `const T` form, `Type2.typeConstructor` for the parenthesized
+/// `const(T)` form, at every nesting level reached through `Type2.type`
+/// (`const(shared(T))`).
+private struct TypeConstructorFlags
+{
+	bool isConst, isImmutable, isShared, isInout;
+}
+
+private void applyTypeConstructor(ref TypeConstructorFlags flags, IdType tc)
+{
+	if (tc == tok!"const")
+		flags.isConst = true;
+	else if (tc == tok!"immutable")
+		flags.isImmutable = true;
+	else if (tc == tok!"shared")
+		flags.isShared = true;
+	else if (tc == tok!"inout")
+		flags.isInout = true;
+}
+
+private void collectTypeConstructors(const(Type) type, ref TypeConstructorFlags result)
+{
+	if (type is null)
+		return;
+	foreach (tc; type.typeConstructors)
+		applyTypeConstructor(result, tc);
+	if (type.type2 !is null && type.type2.typeConstructor != tok!"")
+		applyTypeConstructor(result, type.type2.typeConstructor);
+	if (type.type2 !is null)
+		collectTypeConstructors(type.type2.type, result);
+}
+
+private TypeConstructorFlags collectTypeConstructors(const(Type) type)
+{
+	TypeConstructorFlags result;
+	collectTypeConstructors(type, result);
+	return result;
+}
+
 private bool resolveTypeFromTypeNode(const(Type) type, DSymbol* symbol, TypeLookup* lookup,
 	Scope* moduleScope, ref ModuleCache cache, DSymbol*[string] mapping, out DSymbol* result)
 {
@@ -331,6 +372,44 @@ private bool resolveTypeFromTypeNode(const(Type) type, DSymbol* symbol, TypeLook
 		if (ioti !is null && lookup.applyTypeInstance)
 			base = instantiateFromNode(base, ioti.templateInstance, ioti.tokens, symbol,
 				moduleScope, cache, mapping);
+
+		// Explicit assignment, not accumulation: a symbol retried through the
+		// deferred path (`resolveDeferredTypes`/`checkMissingTypes`) must not
+		// keep a stale `true` from an earlier partial resolution.
+		auto qualifiers = collectTypeConstructors(type);
+		// `P orig;` where `alias P = const(Data*);`: the written `Type` is
+		// just the identifier `P`, with no `const(...)` token of its own for
+		// `collectTypeConstructors` to find -- but for a single, unqualified
+		// name (`resolveTypeIdentifierChain`'s `i == 0` branch), `base` is
+		// `P`'s own alias symbol, not yet dereferenced to its target, so
+		// `P`'s own `declaredTypeIs*` (set when *its* declaration was
+		// resolved the same way) is read directly here. A `p.q` chain
+		// (`i > 0` there) already dereferences through an alias before
+		// reaching the final part, so this only ever fires for a bare name
+		// -- exactly the shape that needs it.
+		//
+		// Restricted to a *same-file* alias, mirroring the exact condition
+		// `dll.d`/`util.d`'s hover/completion rendering already uses to
+		// decide whether to dereference an alias to its target at all
+		// (`type.symbolFile == symbol.symbolFile`). Hover shows the target
+		// (`Data*`) only for a same-file alias like `P`, so wrapping it in
+		// the alias's own qualifier is meaningful there. A cross-file alias
+		// like the builtin `string` (`immutable(char)[]`, from `object.d`)
+		// keeps showing its own bare name, never dereferenced -- and that
+		// name already *is* the qualified type by convention, so wrapping it
+		// too would double up (`immutable(string)`, not `string`).
+		if (!qualifiers.isConst && !qualifiers.isImmutable && !qualifiers.isShared
+			&& !qualifiers.isInout && base !is null && base.kind == CompletionKind.aliasName
+			&& base.symbolFile.length > 0 && base.symbolFile == symbol.symbolFile)
+		{
+			qualifiers = TypeConstructorFlags(base.flags.declaredTypeIsConst,
+				base.flags.declaredTypeIsImmutable, base.flags.declaredTypeIsShared,
+				base.flags.declaredTypeIsInout);
+		}
+		symbol.flags.declaredTypeIsConst = qualifiers.isConst;
+		symbol.flags.declaredTypeIsImmutable = qualifiers.isImmutable;
+		symbol.flags.declaredTypeIsShared = qualifiers.isShared;
+		symbol.flags.declaredTypeIsInout = qualifiers.isInout;
 	}
 
 	if (type.typeSuffixes.length == 0)
@@ -388,8 +467,9 @@ private TypeNodeOutcome resolveTypeofExpression(const(TypeofExpression) te, DSym
 		return TypeNodeOutcome.unmodelled;
 	DSymbol* value;
 	bool handled;
+	TypeConstructorFlags unusedQualifiers;
 	resolveInitializerNode(te.expression, symbol, lookup, moduleScope, cache, mapping,
-		handled, value);
+		handled, value, unusedQualifiers);
 	if (!handled || value is null)
 		return TypeNodeOutcome.unmodelled;
 	typeSwap(value);
@@ -439,8 +519,9 @@ private TypeNodeOutcome resolveTraitsExpression(const(TraitsExpression) tr, DSym
 	else if (arg0.assignExpression !is null)
 	{
 		bool handled;
+		TypeConstructorFlags unusedQualifiers;
 		resolveInitializerNode(arg0.assignExpression, symbol, lookup, moduleScope, cache,
-			mapping, handled, base);
+			mapping, handled, base, unusedQualifiers);
 		if (!handled)
 			return TypeNodeOutcome.unmodelled;
 		typeSwap(base);
@@ -805,10 +886,11 @@ do
  */
 private void resolveInitializerNode(const(BaseNode) expression, DSymbol* symbol,
 	TypeLookup* lookup, Scope* moduleScope, ref ModuleCache cache, DSymbol*[string] mapping,
-	out bool handled, out DSymbol* result)
+	out bool handled, out DSymbol* result, out TypeConstructorFlags qualifiers)
 {
 	result = null;
 	handled = false;
+	qualifiers = TypeConstructorFlags.init;
 	if (expression is null)
 		return;
 
@@ -1125,6 +1207,20 @@ private void resolveInitializerNode(const(BaseNode) expression, DSymbol* symbol,
 				value = callee;
 				if (value !is null)
 				{
+					// The callee's own declared-return-type qualifier
+					// (`const(T**) get(T)()`) -- snapshotted into a local
+					// here, before `typeSwap` below collapses `value` from
+					// the function symbol to its return type and the
+					// association is lost.  Kept in a local, not written to
+					// the shared `qualifiers` yet: an argument that is
+					// itself a call (`get(Data())`) recurses back into this
+					// same branch through `deduceTemplateArguments`'s own
+					// type evaluation below, and would otherwise clobber
+					// this call's qualifier with its argument's (`Data`'s,
+					// always none) on the way back out.
+					auto calleeQualifiers = TypeConstructorFlags(callee.flags.declaredTypeIsConst,
+						callee.flags.declaredTypeIsImmutable, callee.flags.declaredTypeIsShared,
+						callee.flags.declaredTypeIsInout);
 					// IFTI (`get(Data())` calling `T get(T)(T data)`, no
 					// explicit `!(...)`): deduce what each of the callee's
 					// type parameters stands for from the arguments actually
@@ -1137,6 +1233,14 @@ private void resolveInitializerNode(const(BaseNode) expression, DSymbol* symbol,
 					typeSwap(value);
 					if (deduced.length > 0)
 						value = instantiateSymbol(value, moduleScope, cache, deduced);
+					// Applied last, after argument evaluation above had its
+					// chance to (wrongly) overwrite the shared `qualifiers`:
+					// this call's own callee is what should win for this
+					// call's result. An outer call around this one still
+					// overwrites it again on the way further back up the
+					// recursion, which is correct -- the outermost call's
+					// callee is the expression's actual final type.
+					qualifiers = calleeQualifiers;
 				}
 				return true;
 			}
@@ -1575,18 +1679,79 @@ void resolveTypeFromInitializer(DSymbol* symbol, TypeLookup* lookup,
 
 	DSymbol* currentSymbol = null;
 	bool handled;
+	TypeConstructorFlags qualifiers;
 	resolveInitializerNode(lookup.astNode, symbol, lookup, moduleScope, cache, mapping,
-		handled, currentSymbol);
+		handled, currentSymbol, qualifiers);
 	if (!handled)
 		return;
-	if (lookup.kind == TypeLookupKind.foreachElement && currentSymbol !is null)
+	bool isForeachElement = lookup.kind == TypeLookupKind.foreachElement;
+	if (isForeachElement && currentSymbol !is null)
 		currentSymbol = foreachElementStep(currentSymbol);
 	if (currentSymbol is null)
 		return;
 
+	// Neither fallback below applies to an alias reference (`auto x = str;`
+	// where `str`'s type is the `string` alias): an alias's own name is
+	// already a complete, self-contained type name that may itself encode a
+	// qualifier (`string` is `immutable(char)[]`) -- wrapping it in another
+	// `immutable(...)` would double up, turning `string x` into the wrong,
+	// redundant `immutable(string) x`. `typeSwap(..., false)` (used both here
+	// and by IFTI deduction) deliberately keeps an alias as its name instead
+	// of unwrapping to the target for exactly this reason; these fallbacks
+	// must respect that same boundary.
+	bool canFallBackToCurrentSymbol = !isForeachElement
+		&& currentSymbol.kind != CompletionKind.aliasName;
+
+	// `auto x = getDoublePtr!(Data);` (an instantiated template referenced,
+	// not called -- no `functionCallExpression` node, so the capture inside
+	// `resolveInitializerNode`'s call branch never ran): `currentSymbol` here
+	// is still the function/variable symbol itself, not yet collapsed by the
+	// `typeSwap` below, so its own `declaredTypeIs*` flags (set when *its*
+	// declared type was resolved) are read directly as a fallback.
+	if (canFallBackToCurrentSymbol && !qualifiers.isConst && !qualifiers.isImmutable
+		&& !qualifiers.isShared && !qualifiers.isInout)
+	{
+		qualifiers = TypeConstructorFlags(currentSymbol.flags.declaredTypeIsConst,
+			currentSymbol.flags.declaredTypeIsImmutable, currentSymbol.flags.declaredTypeIsShared,
+			currentSymbol.flags.declaredTypeIsInout);
+	}
+
+	// `void f(const int a) { auto c = a; }`: D's `const`/`immutable`/`shared`
+	// are transitive -- a bare-const *parameter*'s own type already is
+	// `const(int)`, not `int` with a separate attribute, so copying it into
+	// an `auto` local should carry the qualifier too. `parameterIsConst`
+	// etc. are a different flag family (the bare-attribute AST shape, not a
+	// type constructor -- see `symbol.d`'s comment on them), so they are not
+	// covered by the `declaredTypeIs*` read above; read as a second fallback,
+	// only once that one found nothing. `parameterIsInout` is deliberately
+	// not included: `inout` on a parameter is a per-call wildcard, not a
+	// concrete qualifier there is anything meaningful to copy.
+	if (canFallBackToCurrentSymbol && !qualifiers.isConst && !qualifiers.isImmutable
+		&& !qualifiers.isShared && !qualifiers.isInout)
+	{
+		qualifiers = TypeConstructorFlags(currentSymbol.flags.parameterIsConst,
+			currentSymbol.flags.parameterIsImmutable, currentSymbol.flags.parameterIsShared, false);
+	}
+
 	typeSwap(currentSymbol, false);
 	symbol.type = currentSymbol;
 	symbol.ownType = false;
+
+	// `auto f = get!(Data);` from `const(T**) get(T)();`: the callee's own
+	// declared-return-type qualifier, captured by `resolveInitializerNode`
+	// before its internal `typeSwap` lost the association -- everything else
+	// that reaches here (a plain literal, a member access, an operator
+	// result) leaves `qualifiers` at its `.init` (all false), which is
+	// correct: there is no declared-type qualifier to attribute in those
+	// cases.  Not applied for a `foreach` element: the qualifier belonged to
+	// the range expression's own type, not to each element's.
+	if (!isForeachElement)
+	{
+		symbol.flags.declaredTypeIsConst = qualifiers.isConst;
+		symbol.flags.declaredTypeIsImmutable = qualifiers.isImmutable;
+		symbol.flags.declaredTypeIsShared = qualifiers.isShared;
+		symbol.flags.declaredTypeIsInout = qualifiers.isInout;
+	}
 
 	if (currentSymbol){
 		//warning(">> type:   ", currentSymbol.name);

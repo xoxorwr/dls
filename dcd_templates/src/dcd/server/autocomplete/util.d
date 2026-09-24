@@ -1049,6 +1049,33 @@ string parameterStorageClassPrefix(const DSymbol* symbol)
 	return prefix;
 }
 
+/// Wraps an already-formatted type name in the type-constructor qualifiers
+/// (`const`/`immutable`/`shared`/`inout`) `symbol`'s own declared type was
+/// written with (`declaredTypeIs*` in `symbol.d`, set by
+/// `resolveTypeFromTypeNode` in `dsymbol/conversion/second.d`) -- distinct
+/// from `parameterStorageClassPrefix`'s bare-attribute flags, and rendered in
+/// D's parenthesized form (`const(Data*)`) rather than a bare prefix, since
+/// that's the actual, unambiguous source syntax. Fixed nesting convention
+/// (`shared` outermost, then immutable/const/inout) when more than one
+/// qualifier applies -- the flags don't record relative source order for a
+/// nested case (`const(shared(T))`), same simplification already accepted
+/// for storage-class priority above.
+string declaredTypeQualifierWrap(const DSymbol* symbol, string typeName)
+{
+	if (!typeName.length)
+		return typeName;
+	string wrapped = typeName;
+	if (symbol.flags.declaredTypeIsImmutable)
+		wrapped = "immutable(" ~ wrapped ~ ")";
+	else if (symbol.flags.declaredTypeIsConst)
+		wrapped = "const(" ~ wrapped ~ ")";
+	else if (symbol.flags.declaredTypeIsInout)
+		wrapped = "inout(" ~ wrapped ~ ")";
+	if (symbol.flags.declaredTypeIsShared)
+		wrapped = "shared(" ~ wrapped ~ ")";
+	return wrapped;
+}
+
 AutocompleteResponse.Completion makeSymbolCompletionInfo(const DSymbol* symbol, char kind)
 {
 	auto ret = AutocompleteResponse.Completion(symbol.name, kind, null,
@@ -1077,7 +1104,8 @@ AutocompleteResponse.Completion makeSymbolCompletionInfo(const DSymbol* symbol, 
 			ret.typeOf = type.formatType;
 
 		if (ret.typeOf.length)
-			ret.typeOf = parameterStorageClassPrefix(symbol) ~ ret.typeOf;
+			ret.typeOf = parameterStorageClassPrefix(symbol)
+				~ declaredTypeQualifierWrap(symbol, ret.typeOf);
 	}
 
 	if ((kind == CompletionKind.variableName || kind == CompletionKind.memberVariableName) && symbol.type)
