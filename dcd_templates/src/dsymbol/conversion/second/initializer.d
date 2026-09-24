@@ -42,483 +42,551 @@ import dparse.ast;
 import dparse.lexer;
 
 /**
- * Resolves an initializer expression from its AST node.
+ * The three outputs `resolveInitializerNode` used to thread through closure
+ * capture: the resolved value, whether the shape was modelled at all, and any
+ * declared-type qualifier the value's own declaration carried (only ever set
+ * by the function-call branch of `evalInitializerExpr`, from the callee's own
+ * flags -- see there).  Returned by value from every recursive call instead
+ * of mutated in place, so an inner call's contribution can never silently
+ * overwrite an outer one's (see `docs/refactor-second.md`: this is what made
+ * the `get(Data())` qualifier-clobbering bug possible in the first place).
+ */
+private struct InitializerResolution
+{
+	DSymbol* value;
+	bool handled;
+	TypeConstructorFlags qualifiers;
+}
+
+/// Evaluates a name / template-instance reference (`TD`, `TD!int`) to the
+/// symbol it stands for.  False only when the shape itself is not modelled
+/// (no identifier at all); a name that fails to resolve still returns true
+/// with a null value, exactly as the rest of the walker does.
+private bool evalIoti(const(IdentifierOrTemplateInstance) ioti, DSymbol* symbol,
+	Scope* moduleScope, ref ModuleCache cache, DSymbol*[string] mapping, out DSymbol* value)
+{
+	value = null;
+	auto name = identifierName(ioti);
+	if (name.length == 0)
+		return false;
+	value = lookupInitializerBase(name, symbol, moduleScope, mapping);
+	// `TD!int`: instantiate with the arguments written at the node.
+	if (value !is null && ioti.templateInstance !is null)
+		value = instantiateFromNode(value, ioti.templateInstance, ioti.tokens, symbol,
+			moduleScope, cache, mapping);
+	return true;
+}
+
+/// The symbol of a builtin type name (`int`, `bool`, `string`), looked up
+/// exactly the way a literal's type name is.
+private DSymbol* builtinType(string name, DSymbol* symbol, Scope* moduleScope,
+	DSymbol*[string] mapping)
+{
+	return name is null
+		? null
+		: lookupInitializerBase(internString(name), symbol, moduleScope, mapping);
+}
+
+/**
+ * Resolves an initializer expression (or subexpression) to the symbol it
+ * stands for.
  *
  * A name chain, prefix `&` / `*` / `!` / `-` / `+` / `~`, index expressions, a
  * call (worth what the callee returns), literals (as their built-in type
  * name), a ternary (its first non-`null` branch), `cast`/`new` (their type),
  * array initializers/literals (element then array) and the builtin operators
- * (see `evalBinary`; `1 << 0` is an `int`, `a == b` a `bool`).  Returns
- * false, leaving the symbol's type unset, for a shape it does not model (a
- * struct initializer, an operator over a user type, a function literal, an
- * unmodelled primary).
+ * (see `evalBinary`; `1 << 0` is an `int`, `a == b` a `bool`).  `handled` is
+ * false, and `value`/`qualifiers` left at their `.init`, for a shape it does
+ * not model (a struct initializer, an operator over a user type, a function
+ * literal, an unmodelled primary).
+ *
+ * `qualifiers` is set only by the function-call branch, from that call's own
+ * callee -- every other branch returns `TypeConstructorFlags.init`.  A branch
+ * that only needs a subexpression's *value* (an array literal's element, an
+ * index step's base, a binary operand, a deduced call argument) reads
+ * `.value`/`.handled` off the recursive call and leaves its own qualifiers at
+ * `.init`; only a branch whose result really *is* a subexpression's result
+ * unchanged (an initializer wrapper, a parenthesised expression, a ternary
+ * branch, the comparison-class forwarding) returns that subexpression's
+ * `InitializerResolution` as its own.
  */
+private InitializerResolution evalInitializerExpr(const(BaseNode) e, DSymbol* symbol,
+	Scope* moduleScope, ref ModuleCache cache, DSymbol*[string] mapping)
+{
+	if (e is null)
+		return InitializerResolution.init;
+
+	// `x = <initializer>`: unwrap to the expression, array or struct
+	// initializer it holds.
+	if (auto init = cast(const(Initializer)) e)
+	{
+		if (init.nonVoidInitializer is null)
+			return InitializerResolution.init;
+		return evalInitializerExpr(init.nonVoidInitializer, symbol, moduleScope, cache, mapping);
+	}
+	if (auto nvi = cast(const(NonVoidInitializer)) e)
+	{
+		if (nvi.assignExpression !is null)
+			return evalInitializerExpr(nvi.assignExpression, symbol, moduleScope, cache, mapping);
+		if (nvi.arrayInitializer !is null)
+			return evalInitializerExpr(nvi.arrayInitializer, symbol, moduleScope, cache, mapping);
+		// A struct initializer: the crumb walk's default traversal mixed
+		// its members' crumbs, which never resolved to anything useful.
+		return InitializerResolution.init;
+	}
+	// `[a, b]`: the element type is the first member's.
+	if (auto ai = cast(const(ArrayInitializer)) e)
+	{
+		DSymbol* element;
+		if (ai.arrayMemberInitializations.length > 0)
+		{
+			auto member = ai.arrayMemberInitializations[0];
+			if (member is null)
+				return InitializerResolution.init;
+			if (member.assignExpression !is null)
+			{
+				auto sub = evalInitializerExpr(member.assignExpression, symbol, moduleScope,
+					cache, mapping);
+				if (!sub.handled)
+					return InitializerResolution.init;
+				element = sub.value;
+			}
+			else if (member.nonVoidInitializer !is null)
+			{
+				auto sub = evalInitializerExpr(member.nonVoidInitializer, symbol, moduleScope,
+					cache, mapping);
+				if (!sub.handled)
+					return InitializerResolution.init;
+				element = sub.value;
+			}
+			else
+				return InitializerResolution.init;
+		}
+		else
+			// An empty array literal: the crumb walk recorded the `void`.
+			element = lookupInitializerBase(internString("void"), symbol, moduleScope, mapping);
+		return InitializerResolution(arrayLiteralSymbol(element), true, TypeConstructorFlags.init);
+	}
+	// `(a, b)`: a comma expression is not a type.
+	if (auto wrapper = cast(const(Expression)) e)
+	{
+		if (wrapper.items.length != 1)
+			return InitializerResolution.init;
+		return evalInitializerExpr(wrapper.items[0], symbol, moduleScope, cache, mapping);
+	}
+	// `cast(T) e`: the cast's *type* is what the expression stands for
+	// (the crumb producer fed it through `addTypeToLookups`).
+	if (auto castExpr = cast(const(CastExpression)) e)
+	{
+		if (castExpr.type is null)
+			return InitializerResolution.init;
+		bool ok;
+		auto value = resolveTypeNodeValue(castExpr.type, symbol, moduleScope, cache, mapping, ok);
+		return InitializerResolution(value, ok, TypeConstructorFlags.init);
+	}
+	// `new T(...)`: a value of `T`.
+	if (auto ne = cast(const(NewExpression)) e)
+	{
+		if (ne.type is null || ne.newAnonClassExpression !is null)
+			return InitializerResolution.init;
+		bool ok;
+		auto value = resolveTypeNodeValue(ne.type, symbol, moduleScope, cache, mapping, ok);
+		return InitializerResolution(value, ok, TypeConstructorFlags.init);
+	}
+	// A comparison is wrapped: `CmpExpression` is what holds the one
+	// (`<` -> `relExpression`, `==` -> `equalExpression`, ...), or the
+	// plain expression when there is no comparison operator at all.
+	if (auto cmp = cast(const(CmpExpression)) e)
+	{
+		if (cmp.shiftExpression !is null)
+			return evalInitializerExpr(cmp.shiftExpression, symbol, moduleScope, cache, mapping);
+		if (cmp.equalExpression !is null)
+			return evalInitializerExpr(cmp.equalExpression, symbol, moduleScope, cache, mapping);
+		if (cmp.identityExpression !is null)
+			return evalInitializerExpr(cmp.identityExpression, symbol, moduleScope, cache, mapping);
+		if (cmp.relExpression !is null)
+			return evalInitializerExpr(cmp.relExpression, symbol, moduleScope, cache, mapping);
+		if (cmp.inExpression !is null)
+			return evalInitializerExpr(cmp.inExpression, symbol, moduleScope, cache, mapping);
+		return InitializerResolution.init;
+	}
+
+	{
+		DSymbol* binaryValue;
+		if (evalBinary(e, symbol, moduleScope, cache, mapping, binaryValue))
+			return InitializerResolution(binaryValue, true, TypeConstructorFlags.init);
+	}
+
+	if (auto unary = cast(const(UnaryExpression)) e)
+	{
+		// `a.b` / `a.b!(int)`: a member of what is on the left.
+		if (unary.identifierOrTemplateInstance !is null)
+		{
+			auto ioti = unary.identifierOrTemplateInstance;
+			if (unary.unaryExpression is null)
+			{
+				// `TD` / `TD!int` with nothing to the left of it.
+				DSymbol* value;
+				if (!evalIoti(ioti, symbol, moduleScope, cache, mapping, value))
+					return InitializerResolution.init;
+				return InitializerResolution(value, true, TypeConstructorFlags.init);
+			}
+			auto left = evalInitializerExpr(unary.unaryExpression, symbol, moduleScope, cache,
+				mapping);
+			if (!left.handled)
+				return InitializerResolution.init;
+			auto value = memberStep(left.value, identifierName(ioti), moduleScope);
+			if (value !is null && ioti.templateInstance !is null)
+				value = instantiateFromNode(value, ioti.templateInstance, ioti.tokens,
+					symbol, moduleScope, cache, mapping);
+			return InitializerResolution(value, true, TypeConstructorFlags.init);
+		}
+		if (unary.primaryExpression !is null)
+		{
+			// `TD` / `TD!int` as a primary expression.
+			if (unary.primaryExpression.identifierOrTemplateInstance !is null)
+			{
+				DSymbol* value;
+				if (!evalIoti(unary.primaryExpression.identifierOrTemplateInstance, symbol,
+						moduleScope, cache, mapping, value))
+					return InitializerResolution.init;
+				return InitializerResolution(value, true, TypeConstructorFlags.init);
+			}
+			// A parenthesised expression (`(1 << 0)`) or an array literal
+			// needs the primary node's own walk, not just its literal.
+			return evalInitializerExpr(unary.primaryExpression, symbol, moduleScope, cache,
+				mapping);
+		}
+		// `foo(...)`: worth what the callee returns.
+		if (unary.functionCallExpression !is null)
+		{
+			auto calleeEval = evalInitializerExpr(unary.functionCallExpression.unaryExpression,
+				symbol, moduleScope, cache, mapping);
+			if (!calleeEval.handled)
+				return InitializerResolution.init;
+			DSymbol* callee = calleeEval.value;
+			DSymbol* value = callee;
+			TypeConstructorFlags resultQualifiers;
+			if (value !is null)
+			{
+				// The callee's own declared-return-type qualifier
+				// (`const(T**) get(T)()`) -- read before `typeSwap` below
+				// collapses `value` from the function symbol to its return
+				// type and the association is lost.  This call's own
+				// return value unconditionally, regardless of what
+				// `deduceTemplateArguments` below returns for its
+				// arguments: an argument that is itself a call
+				// (`get(Data())`) evaluates in its own
+				// `evalInitializerExpr` call and returns its own
+				// `InitializerResolution` with `Data`'s qualifiers, which
+				// `deduceTemplateArguments` reads `.value` from and
+				// discards -- there is no shared variable left for it to
+				// clobber.
+				resultQualifiers = TypeConstructorFlags(callee.flags.declaredTypeIsConst,
+					callee.flags.declaredTypeIsImmutable, callee.flags.declaredTypeIsShared,
+					callee.flags.declaredTypeIsInout);
+				// IFTI (`get(Data())` calling `T get(T)(T data)`, no
+				// explicit `!(...)`): deduce what each of the callee's
+				// type parameters stands for from the arguments actually
+				// written, positionally, before resolving what it
+				// returns -- otherwise the return type is left as the
+				// parameter symbol itself (`T`), not the argument's type
+				// (`Data`).
+				auto deduced = deduceTemplateArguments(callee,
+					unary.functionCallExpression.arguments, symbol, moduleScope, cache, mapping);
+				typeSwap(value);
+				if (deduced.length > 0)
+					value = instantiateSymbol(value, moduleScope, cache, deduced);
+			}
+			return InitializerResolution(value, true, resultQualifiers);
+		}
+		// `a[i]`: one step down per index that is not a slice.
+		if (unary.indexExpression !is null)
+		{
+			auto base = evalInitializerExpr(unary.indexExpression.unaryExpression, symbol,
+				moduleScope, cache, mapping);
+			if (!base.handled)
+				return InitializerResolution.init;
+			auto value = applyInitializerIndexes(base.value, unary.indexExpression.indexes,
+				moduleScope);
+			return InitializerResolution(value, true, TypeConstructorFlags.init);
+		}
+		// `cast(T) e`: the crumb producer encodes the cast's *type*
+		// through `addTypeToLookups`, so the type is what the expression
+		// stands for.
+		if (unary.castExpression !is null)
+			return evalInitializerExpr(unary.castExpression, symbol, moduleScope, cache, mapping);
+		// `new T(...)`: a value of `T`.
+		if (unary.newExpression !is null)
+			return evalInitializerExpr(unary.newExpression, symbol, moduleScope, cache, mapping);
+		// prefix `!` (a `bool`) and `-` / `+` / `~` (the promoted
+		// operand type, through the builtin scalars only).
+		if (unary.unaryExpression !is null
+			&& (unary.prefix.type == tok!"!" || unary.prefix.type == tok!"-"
+				|| unary.prefix.type == tok!"+" || unary.prefix.type == tok!"~"))
+		{
+			auto operandEval = evalInitializerExpr(unary.unaryExpression, symbol, moduleScope,
+				cache, mapping);
+			if (!operandEval.handled)
+				return InitializerResolution.init;
+			DSymbol* value;
+			if (unary.prefix.type == tok!"!")
+				value = builtinType("bool", symbol, moduleScope, mapping);
+			else
+			{
+				auto operand = operandEval.value;
+				typeSwap(operand, false);
+				value = builtinType(promotedScalarName(operandTypeName(operand)), symbol,
+					moduleScope, mapping);
+			}
+			return InitializerResolution(value, value !is null, TypeConstructorFlags.init);
+		}
+		// prefix `&` / `*`.
+		if (unary.unaryExpression !is null)
+		{
+			auto baseEval = evalInitializerExpr(unary.unaryExpression, symbol, moduleScope,
+				cache, mapping);
+			if (!baseEval.handled)
+				return InitializerResolution.init;
+			DSymbol* base = baseEval.value;
+			if (base !is null)
+				typeSwap(base);
+			if (base !is null)
+			{
+				if (unary.prefix.type == tok!"&")
+					base = initializerPointerStep(base);
+				else if (unary.prefix.type == tok!"*")
+					base = initializerIndexStep(base, moduleScope);
+				else
+					return InitializerResolution.init;
+			}
+			return InitializerResolution(base, true, TypeConstructorFlags.init);
+		}
+		return InitializerResolution.init;
+	}
+
+	if (auto index = cast(const(IndexExpression)) e)
+	{
+		auto base = evalInitializerExpr(index.unaryExpression, symbol, moduleScope, cache, mapping);
+		if (!base.handled)
+			return InitializerResolution.init;
+		auto value = applyInitializerIndexes(base.value, index.indexes, moduleScope);
+		return InitializerResolution(value, true, TypeConstructorFlags.init);
+	}
+
+	if (auto ternary = cast(const(TernaryExpression)) e)
+	{
+		// The first branch that is not a bare `null`.
+		if (ternary.expression !is null && !isNullLiteral(ternary.expression))
+			return evalInitializerExpr(ternary.expression, symbol, moduleScope, cache, mapping);
+		if (ternary.ternaryExpression !is null)
+			return evalInitializerExpr(ternary.ternaryExpression, symbol, moduleScope, cache,
+				mapping);
+		return InitializerResolution.init;
+	}
+
+	if (auto primary = cast(const(PrimaryExpression)) e)
+	{
+		// `[a, b]` in expression position (`f([1,2])`, `[1,2].length`).
+		if (primary.arrayLiteral !is null)
+		{
+			auto al = primary.arrayLiteral;
+			DSymbol* element;
+			if (al.argumentList !is null && al.argumentList.items.length > 0)
+			{
+				auto sub = evalInitializerExpr(al.argumentList.items[0], symbol, moduleScope,
+					cache, mapping);
+				if (!sub.handled)
+					return InitializerResolution.init;
+				element = sub.value;
+			}
+			else
+				element = lookupInitializerBase(internString("void"), symbol, moduleScope,
+					mapping);
+			return InitializerResolution(arrayLiteralSymbol(element), true, TypeConstructorFlags.init);
+		}
+		// `(expr)`: the parser records the parenthesised expression (as
+		// the one-item list the `Expression` node holds) in the primary.
+		if (primary.expression !is null)
+			return evalInitializerExpr(primary.expression, symbol, moduleScope, cache, mapping);
+		DSymbol* value;
+		auto ok = evalInitializerPrimary(primary, symbol, moduleScope, mapping, value);
+		return InitializerResolution(value, ok, TypeConstructorFlags.init);
+	}
+
+	return InitializerResolution.init;
+}
+
+// The result of one binary operator over two operands.  `typeSwap(...,
+// false)` keeps an alias name, so a `string` operand stays a `string`
+// instead of becoming the array type.
+private bool evalBinaryResult(BinaryKind kind, const(ExpressionNode) leftNode,
+	const(ExpressionNode) rightNode, DSymbol* symbol, Scope* moduleScope, ref ModuleCache cache,
+	DSymbol*[string] mapping, out DSymbol* result)
+{
+	result = null;
+	// Only the operands its kind actually reads are evaluated: a
+	// comparison is a `bool` whatever it compares.
+	DSymbol* leftOperand = null;
+	DSymbol* rightOperand = null;
+	final switch (kind)
+	{
+	case BinaryKind.comparison:
+	case BinaryKind.logical:
+		break;
+	case BinaryKind.shift:
+	{
+		auto l = evalInitializerExpr(leftNode, symbol, moduleScope, cache, mapping);
+		if (!l.handled)
+			return false;
+		leftOperand = l.value;
+		typeSwap(leftOperand, false);
+		break;
+	}
+	case BinaryKind.concatenation:
+	case BinaryKind.arithmetic:
+	{
+		auto l = evalInitializerExpr(leftNode, symbol, moduleScope, cache, mapping);
+		auto r = evalInitializerExpr(rightNode, symbol, moduleScope, cache, mapping);
+		if (!l.handled || !r.handled)
+			return false;
+		leftOperand = l.value;
+		rightOperand = r.value;
+		typeSwap(leftOperand, false);
+		typeSwap(rightOperand, false);
+		break;
+	}
+	}
+	auto name = binaryResultTypeName(kind, leftOperand, rightOperand);
+	if (name is null)
+		return false;
+	result = builtinType(name, symbol, moduleScope, mapping);
+	return result !is null;
+}
+
+// `a <op> b`: dparse has one class per operator (see the casts below),
+// and the class says what the result is.  Anything else -- an
+// overloaded `opBinary`, an enum member's base type -- stays
+// unmodelled and leaves the symbol untyped.
+private bool evalBinary(const(BaseNode) node, DSymbol* symbol, Scope* moduleScope,
+	ref ModuleCache cache, DSymbol*[string] mapping, out DSymbol* result)
+{
+	result = null;
+	if (auto binary = cast(const(AddExpression)) node)
+		return evalBinaryResult(
+			binary.operator == tok!"~" ? BinaryKind.concatenation
+				: BinaryKind.arithmetic,
+			binary.left, binary.right, symbol, moduleScope, cache, mapping, result);
+	if (auto binary = cast(const(MulExpression)) node)
+		return evalBinaryResult(BinaryKind.arithmetic, binary.left, binary.right, symbol,
+			moduleScope, cache, mapping, result);
+	if (auto binary = cast(const(ShiftExpression)) node)
+		return evalBinaryResult(BinaryKind.shift, binary.left, binary.right, symbol, moduleScope,
+			cache, mapping, result);
+	if (auto binary = cast(const(AndExpression)) node)
+		return evalBinaryResult(BinaryKind.arithmetic, binary.left, binary.right, symbol,
+			moduleScope, cache, mapping, result);
+	if (auto binary = cast(const(OrExpression)) node)
+		return evalBinaryResult(BinaryKind.arithmetic, binary.left, binary.right, symbol,
+			moduleScope, cache, mapping, result);
+	if (auto binary = cast(const(XorExpression)) node)
+		return evalBinaryResult(BinaryKind.arithmetic, binary.left, binary.right, symbol,
+			moduleScope, cache, mapping, result);
+	if (auto binary = cast(const(PowExpression)) node)
+		return evalBinaryResult(BinaryKind.arithmetic, binary.left, binary.right, symbol,
+			moduleScope, cache, mapping, result);
+	if (auto binary = cast(const(EqualExpression)) node)
+		return evalBinaryResult(BinaryKind.comparison, binary.left, binary.right, symbol,
+			moduleScope, cache, mapping, result);
+	if (auto binary = cast(const(RelExpression)) node)
+		return evalBinaryResult(BinaryKind.comparison, binary.left, binary.right, symbol,
+			moduleScope, cache, mapping, result);
+	if (auto binary = cast(const(IdentityExpression)) node)
+		return evalBinaryResult(BinaryKind.comparison, binary.left, binary.right, symbol,
+			moduleScope, cache, mapping, result);
+	if (auto binary = cast(const(AndAndExpression)) node)
+		return evalBinaryResult(BinaryKind.logical, binary.left, binary.right, symbol, moduleScope,
+			cache, mapping, result);
+	if (auto binary = cast(const(OrOrExpression)) node)
+		return evalBinaryResult(BinaryKind.logical, binary.left, binary.right, symbol, moduleScope,
+			cache, mapping, result);
+	return false;
+}
+
+// Positional IFTI: for each of `callee`'s parameters whose declared
+// type resolves, once any array/pointer/assoc-array wrapping is
+// peeled off both sides in lockstep, to one of the callee's own
+// `typeTmpParam` children (`T data` inside `T get(T)(T data)`, or
+// `T[] arr` inside `T first(T)(T[] arr)`), the type the argument
+// written at that position has under the same wrapping is what the
+// parameter stands for. A parameter built out of a template
+// parameter some other way (`const(T)`) is left unresolved, same as
+// an argument whose own type could not be evaluated, or one wrapped
+// differently than the parameter (`first(3)` against `T[]`).
+private DSymbol*[string] deduceTemplateArguments(DSymbol* callee, const Arguments arguments,
+	DSymbol* symbol, Scope* moduleScope, ref ModuleCache cache, DSymbol*[string] mapping)
+{
+	DSymbol*[string] deduced;
+	if (callee is null || arguments is null || arguments.namedArgumentList is null)
+		return deduced;
+	auto args = arguments.namedArgumentList.items;
+	auto params = callee.functionParameters;
+	foreach (i, param; params)
+	{
+		if (param is null || param.type is null)
+			continue;
+		if (i >= args.length || args[i] is null || args[i].assignExpression is null)
+			continue;
+		auto argEval = evalInitializerExpr(args[i].assignExpression, symbol, moduleScope, cache,
+			mapping);
+		if (!argEval.handled || argEval.value is null)
+			continue;
+		DSymbol* argType = argEval.value;
+		// `false`: keep an alias (`string`) as itself, the same way
+		// `evalBinaryResult` does -- otherwise `wrap("hi")` would
+		// deduce `T` as `char[]`, `string`'s aliased-to type, not
+		// `string` itself.
+		typeSwap(argType, false);
+
+		DSymbol* paramType = param.type;
+		while (paramType !is null && argType !is null
+			&& paramType.kind == CompletionKind.dummy)
+		{
+			// An array literal (`[1, 2, 3]`) is marked
+			// `ARRAY_LITERAL_SYMBOL_NAME`, not the `ARRAY_SYMBOL_NAME`
+			// a declared `T[]` parameter wraps with -- same shape,
+			// different marker, so `T[] arr` deduces against a
+			// literal argument too, not only a variable already of
+			// array type.
+			bool matches = paramType.name == ARRAY_SYMBOL_NAME
+				? (argType.name == ARRAY_SYMBOL_NAME
+					|| argType.name == ARRAY_LITERAL_SYMBOL_NAME)
+				: paramType.name == argType.name
+					&& (paramType.name == POINTER_SYMBOL_NAME
+						|| paramType.name == ASSOC_ARRAY_SYMBOL_NAME);
+			if (!matches)
+				break;
+			paramType = paramType.type;
+			argType = argType.type;
+		}
+		if (paramType is null || argType is null
+			|| paramType.kind != CompletionKind.typeTmpParam)
+			continue;
+		if (paramType.name in deduced)
+			continue;
+		deduced[paramType.name] = argType;
+	}
+	return deduced;
+}
+
 package void resolveInitializerNode(const(BaseNode) expression, DSymbol* symbol,
 	TypeLookup* lookup, Scope* moduleScope, ref ModuleCache cache, DSymbol*[string] mapping,
 	out bool handled, out DSymbol* result, out TypeConstructorFlags qualifiers)
 {
-	result = null;
-	handled = false;
-	qualifiers = TypeConstructorFlags.init;
-	if (expression is null)
-		return;
-
-	// Evaluate an expression (or an initializer wrapper) to the symbol it
-	// stands for.  Returns false when the *shape* is not modelled.
-	bool evalIoti(const(IdentifierOrTemplateInstance) ioti, out DSymbol* value)
-	{
-		value = null;
-		auto name = identifierName(ioti);
-		if (name.length == 0)
-			return false;
-		value = lookupInitializerBase(name, symbol, moduleScope, mapping);
-		// `TD!int`: instantiate with the arguments written at the node.
-		if (value !is null && ioti.templateInstance !is null)
-			value = instantiateFromNode(value, ioti.templateInstance, ioti.tokens, symbol,
-				moduleScope, cache, mapping);
-		return true;
-	}
-
-	// The symbol of a builtin type name (`int`, `bool`, `string`), looked up
-	// exactly the way a literal's type name is.
-	DSymbol* builtinType(string name)
-	{
-		return name is null
-			? null
-			: lookupInitializerBase(internString(name), symbol, moduleScope, mapping);
-	}
-
-	bool evalNode(const(BaseNode) e, out DSymbol* value)
-	{
-		value = null;
-		if (e is null)
-			return false;
-
-		// `x = <initializer>`: unwrap to the expression, array or struct
-		// initializer it holds.
-		if (auto init = cast(const(Initializer)) e)
-		{
-			if (init.nonVoidInitializer is null)
-				return false;
-			return evalNode(init.nonVoidInitializer, value);
-		}
-		if (auto nvi = cast(const(NonVoidInitializer)) e)
-		{
-			if (nvi.assignExpression !is null)
-				return evalNode(nvi.assignExpression, value);
-			if (nvi.arrayInitializer !is null)
-				return evalNode(nvi.arrayInitializer, value);
-			// A struct initializer: the crumb walk's default traversal mixed
-			// its members' crumbs, which never resolved to anything useful.
-			return false;
-		}
-		// `[a, b]`: the element type is the first member's.
-		if (auto ai = cast(const(ArrayInitializer)) e)
-		{
-			DSymbol* element;
-			if (ai.arrayMemberInitializations.length > 0)
-			{
-				auto member = ai.arrayMemberInitializations[0];
-				if (member is null)
-					return false;
-				if (member.assignExpression !is null)
-				{
-					if (!evalNode(member.assignExpression, element))
-						return false;
-				}
-				else if (member.nonVoidInitializer !is null)
-				{
-					if (!evalNode(member.nonVoidInitializer, element))
-						return false;
-				}
-				else
-					return false;
-			}
-			else
-				// An empty array literal: the crumb walk recorded the `void`.
-				element = lookupInitializerBase(internString("void"), symbol,
-					moduleScope, mapping);
-			value = arrayLiteralSymbol(element);
-			return true;
-		}
-		// `(a, b)`: a comma expression is not a type.
-		if (auto wrapper = cast(const(Expression)) e)
-		{
-			if (wrapper.items.length != 1)
-				return false;
-			return evalNode(wrapper.items[0], value);
-		}
-		// `cast(T) e`: the cast's *type* is what the expression stands for
-		// (the crumb producer fed it through `addTypeToLookups`).
-		if (auto castExpr = cast(const(CastExpression)) e)
-		{
-			if (castExpr.type is null)
-				return false;
-			bool ok;
-			value = resolveTypeNodeValue(castExpr.type, symbol, moduleScope, cache, mapping, ok);
-			return ok;
-		}
-		// `new T(...)`: a value of `T`.
-		if (auto ne = cast(const(NewExpression)) e)
-		{
-			if (ne.type is null || ne.newAnonClassExpression !is null)
-				return false;
-			bool ok;
-			value = resolveTypeNodeValue(ne.type, symbol, moduleScope, cache, mapping, ok);
-			return ok;
-		}
-		// A comparison is wrapped: `CmpExpression` is what holds the one
-		// (`<` -> `relExpression`, `==` -> `equalExpression`, ...), or the
-		// plain expression when there is no comparison operator at all.
-		if (auto cmp = cast(const(CmpExpression)) e)
-		{
-			if (cmp.shiftExpression !is null)
-				return evalNode(cmp.shiftExpression, value);
-			if (cmp.equalExpression !is null)
-				return evalNode(cmp.equalExpression, value);
-			if (cmp.identityExpression !is null)
-				return evalNode(cmp.identityExpression, value);
-			if (cmp.relExpression !is null)
-				return evalNode(cmp.relExpression, value);
-			if (cmp.inExpression !is null)
-				return evalNode(cmp.inExpression, value);
-			return false;
-		}
-
-		// The result of one binary operator over two operands.  `typeSwap(...,
-		// false)` keeps an alias name, so a `string` operand stays a `string`
-		// instead of becoming the array type.
-		bool evalBinaryResult(BinaryKind kind, const(ExpressionNode) leftNode,
-			const(ExpressionNode) rightNode, out DSymbol* result)
-		{
-			result = null;
-			// Only the operands its kind actually reads are evaluated: a
-			// comparison is a `bool` whatever it compares.
-			DSymbol* leftOperand = null;
-			DSymbol* rightOperand = null;
-			final switch (kind)
-			{
-			case BinaryKind.comparison:
-			case BinaryKind.logical:
-				break;
-			case BinaryKind.shift:
-				if (!evalNode(leftNode, leftOperand))
-					return false;
-				typeSwap(leftOperand, false);
-				break;
-			case BinaryKind.concatenation:
-			case BinaryKind.arithmetic:
-				if (!evalNode(leftNode, leftOperand) || !evalNode(rightNode, rightOperand))
-					return false;
-				typeSwap(leftOperand, false);
-				typeSwap(rightOperand, false);
-				break;
-			}
-			auto name = binaryResultTypeName(kind, leftOperand, rightOperand);
-			if (name is null)
-				return false;
-			result = builtinType(name);
-			return result !is null;
-		}
-
-		// `a <op> b`: dparse has one class per operator (see the casts below),
-		// and the class says what the result is.  Anything else -- an
-		// overloaded `opBinary`, an enum member's base type -- stays
-		// unmodelled and leaves the symbol untyped.
-		bool evalBinary(const(BaseNode) node, out DSymbol* result)
-		{
-			result = null;
-			if (auto binary = cast(const(AddExpression)) node)
-				return evalBinaryResult(
-					binary.operator == tok!"~" ? BinaryKind.concatenation
-						: BinaryKind.arithmetic,
-					binary.left, binary.right, result);
-			if (auto binary = cast(const(MulExpression)) node)
-				return evalBinaryResult(BinaryKind.arithmetic, binary.left, binary.right,
-					result);
-			if (auto binary = cast(const(ShiftExpression)) node)
-				return evalBinaryResult(BinaryKind.shift, binary.left, binary.right, result);
-			if (auto binary = cast(const(AndExpression)) node)
-				return evalBinaryResult(BinaryKind.arithmetic, binary.left, binary.right,
-					result);
-			if (auto binary = cast(const(OrExpression)) node)
-				return evalBinaryResult(BinaryKind.arithmetic, binary.left, binary.right,
-					result);
-			if (auto binary = cast(const(XorExpression)) node)
-				return evalBinaryResult(BinaryKind.arithmetic, binary.left, binary.right,
-					result);
-			if (auto binary = cast(const(PowExpression)) node)
-				return evalBinaryResult(BinaryKind.arithmetic, binary.left, binary.right,
-					result);
-			if (auto binary = cast(const(EqualExpression)) node)
-				return evalBinaryResult(BinaryKind.comparison, binary.left, binary.right,
-					result);
-			if (auto binary = cast(const(RelExpression)) node)
-				return evalBinaryResult(BinaryKind.comparison, binary.left, binary.right,
-					result);
-			if (auto binary = cast(const(IdentityExpression)) node)
-				return evalBinaryResult(BinaryKind.comparison, binary.left, binary.right,
-					result);
-			if (auto binary = cast(const(AndAndExpression)) node)
-				return evalBinaryResult(BinaryKind.logical, binary.left, binary.right, result);
-			if (auto binary = cast(const(OrOrExpression)) node)
-				return evalBinaryResult(BinaryKind.logical, binary.left, binary.right, result);
-			return false;
-		}
-
-		if (evalBinary(e, value))
-			return true;
-
-		// Positional IFTI: for each of `callee`'s parameters whose declared
-		// type resolves, once any array/pointer/assoc-array wrapping is
-		// peeled off both sides in lockstep, to one of the callee's own
-		// `typeTmpParam` children (`T data` inside `T get(T)(T data)`, or
-		// `T[] arr` inside `T first(T)(T[] arr)`), the type the argument
-		// written at that position has under the same wrapping is what the
-		// parameter stands for. A parameter built out of a template
-		// parameter some other way (`const(T)`) is left unresolved, same as
-		// an argument whose own type could not be evaluated, or one wrapped
-		// differently than the parameter (`first(3)` against `T[]`).
-		DSymbol*[string] deduceTemplateArguments(DSymbol* callee, const Arguments arguments)
-		{
-			DSymbol*[string] deduced;
-			if (callee is null || arguments is null || arguments.namedArgumentList is null)
-				return deduced;
-			auto args = arguments.namedArgumentList.items;
-			auto params = callee.functionParameters;
-			foreach (i, param; params)
-			{
-				if (param is null || param.type is null)
-					continue;
-				if (i >= args.length || args[i] is null || args[i].assignExpression is null)
-					continue;
-				DSymbol* argType;
-				if (!evalNode(args[i].assignExpression, argType) || argType is null)
-					continue;
-				// `false`: keep an alias (`string`) as itself, the same way
-				// `evalBinaryResult` does -- otherwise `wrap("hi")` would
-				// deduce `T` as `char[]`, `string`'s aliased-to type, not
-				// `string` itself.
-				typeSwap(argType, false);
-
-				DSymbol* paramType = param.type;
-				while (paramType !is null && argType !is null
-					&& paramType.kind == CompletionKind.dummy)
-				{
-					// An array literal (`[1, 2, 3]`) is marked
-					// `ARRAY_LITERAL_SYMBOL_NAME`, not the `ARRAY_SYMBOL_NAME`
-					// a declared `T[]` parameter wraps with -- same shape,
-					// different marker, so `T[] arr` deduces against a
-					// literal argument too, not only a variable already of
-					// array type.
-					bool matches = paramType.name == ARRAY_SYMBOL_NAME
-						? (argType.name == ARRAY_SYMBOL_NAME
-							|| argType.name == ARRAY_LITERAL_SYMBOL_NAME)
-						: paramType.name == argType.name
-							&& (paramType.name == POINTER_SYMBOL_NAME
-								|| paramType.name == ASSOC_ARRAY_SYMBOL_NAME);
-					if (!matches)
-						break;
-					paramType = paramType.type;
-					argType = argType.type;
-				}
-				if (paramType is null || argType is null
-					|| paramType.kind != CompletionKind.typeTmpParam)
-					continue;
-				if (paramType.name in deduced)
-					continue;
-				deduced[paramType.name] = argType;
-			}
-			return deduced;
-		}
-
-		if (auto unary = cast(const(UnaryExpression)) e)
-		{
-			// `a.b` / `a.b!(int)`: a member of what is on the left.
-			if (unary.identifierOrTemplateInstance !is null)
-			{
-				auto ioti = unary.identifierOrTemplateInstance;
-				if (unary.unaryExpression is null)
-				{
-					// `TD` / `TD!int` with nothing to the left of it.
-					if (!evalIoti(ioti, value))
-						return false;
-					return true;
-				}
-				DSymbol* left;
-				if (!evalNode(unary.unaryExpression, left))
-					return false;
-				value = memberStep(left, identifierName(ioti), moduleScope);
-				if (value !is null && ioti.templateInstance !is null)
-					value = instantiateFromNode(value, ioti.templateInstance, ioti.tokens,
-						symbol, moduleScope, cache, mapping);
-				return true;
-			}
-			if (unary.primaryExpression !is null)
-			{
-				// `TD` / `TD!int` as a primary expression.
-				if (unary.primaryExpression.identifierOrTemplateInstance !is null)
-				{
-					if (!evalIoti(unary.primaryExpression.identifierOrTemplateInstance, value))
-						return false;
-					return true;
-				}
-				// A parenthesised expression (`(1 << 0)`) or an array literal
-				// needs the primary node's own walk, not just its literal.
-				return evalNode(unary.primaryExpression, value);
-			}
-			// `foo(...)`: worth what the callee returns.
-			if (unary.functionCallExpression !is null)
-			{
-				DSymbol* callee;
-				if (!evalNode(unary.functionCallExpression.unaryExpression, callee))
-					return false;
-				value = callee;
-				if (value !is null)
-				{
-					// The callee's own declared-return-type qualifier
-					// (`const(T**) get(T)()`) -- snapshotted into a local
-					// here, before `typeSwap` below collapses `value` from
-					// the function symbol to its return type and the
-					// association is lost.  Kept in a local, not written to
-					// the shared `qualifiers` yet: an argument that is
-					// itself a call (`get(Data())`) recurses back into this
-					// same branch through `deduceTemplateArguments`'s own
-					// type evaluation below, and would otherwise clobber
-					// this call's qualifier with its argument's (`Data`'s,
-					// always none) on the way back out.
-					auto calleeQualifiers = TypeConstructorFlags(callee.flags.declaredTypeIsConst,
-						callee.flags.declaredTypeIsImmutable, callee.flags.declaredTypeIsShared,
-						callee.flags.declaredTypeIsInout);
-					// IFTI (`get(Data())` calling `T get(T)(T data)`, no
-					// explicit `!(...)`): deduce what each of the callee's
-					// type parameters stands for from the arguments actually
-					// written, positionally, before resolving what it
-					// returns -- otherwise the return type is left as the
-					// parameter symbol itself (`T`), not the argument's type
-					// (`Data`).
-					auto deduced = deduceTemplateArguments(callee,
-						unary.functionCallExpression.arguments);
-					typeSwap(value);
-					if (deduced.length > 0)
-						value = instantiateSymbol(value, moduleScope, cache, deduced);
-					// Applied last, after argument evaluation above had its
-					// chance to (wrongly) overwrite the shared `qualifiers`:
-					// this call's own callee is what should win for this
-					// call's result. An outer call around this one still
-					// overwrites it again on the way further back up the
-					// recursion, which is correct -- the outermost call's
-					// callee is the expression's actual final type.
-					qualifiers = calleeQualifiers;
-				}
-				return true;
-			}
-			// `a[i]`: one step down per index that is not a slice.
-			if (unary.indexExpression !is null)
-			{
-				DSymbol* base;
-				if (!evalNode(unary.indexExpression.unaryExpression, base))
-					return false;
-				value = applyInitializerIndexes(base, unary.indexExpression.indexes, moduleScope);
-				return true;
-			}
-			// `cast(T) e`: the crumb producer encodes the cast's *type*
-			// through `addTypeToLookups`, so the type is what the expression
-			// stands for.
-			if (unary.castExpression !is null)
-				return evalNode(unary.castExpression, value);
-			// `new T(...)`: a value of `T`.
-			if (unary.newExpression !is null)
-				return evalNode(unary.newExpression, value);
-			// prefix `!` (a `bool`) and `-` / `+` / `~` (the promoted
-			// operand type, through the builtin scalars only).
-			if (unary.unaryExpression !is null
-				&& (unary.prefix.type == tok!"!" || unary.prefix.type == tok!"-"
-					|| unary.prefix.type == tok!"+" || unary.prefix.type == tok!"~"))
-			{
-				DSymbol* operand;
-				if (!evalNode(unary.unaryExpression, operand))
-					return false;
-				if (unary.prefix.type == tok!"!")
-					value = builtinType("bool");
-				else
-				{
-					typeSwap(operand, false);
-					value = builtinType(promotedScalarName(operandTypeName(operand)));
-				}
-				return value !is null;
-			}
-			// prefix `&` / `*`.
-			if (unary.unaryExpression !is null)
-			{
-				DSymbol* base;
-				if (!evalNode(unary.unaryExpression, base))
-					return false;
-				if (base !is null)
-					typeSwap(base);
-				if (base !is null)
-				{
-					if (unary.prefix.type == tok!"&")
-						base = initializerPointerStep(base);
-					else if (unary.prefix.type == tok!"*")
-						base = initializerIndexStep(base, moduleScope);
-					else
-						return false;
-				}
-				value = base;
-				return true;
-			}
-			return false;
-		}
-
-		if (auto index = cast(const(IndexExpression)) e)
-		{
-			DSymbol* base;
-			if (!evalNode(index.unaryExpression, base))
-				return false;
-			value = applyInitializerIndexes(base, index.indexes, moduleScope);
-			return true;
-		}
-
-		if (auto ternary = cast(const(TernaryExpression)) e)
-		{
-			// The first branch that is not a bare `null`.
-			if (ternary.expression !is null && !isNullLiteral(ternary.expression))
-				return evalNode(ternary.expression, value);
-			if (ternary.ternaryExpression !is null)
-				return evalNode(ternary.ternaryExpression, value);
-			return false;
-		}
-
-		if (auto primary = cast(const(PrimaryExpression)) e)
-		{
-			// `[a, b]` in expression position (`f([1,2])`, `[1,2].length`).
-			if (primary.arrayLiteral !is null)
-			{
-				auto al = primary.arrayLiteral;
-				DSymbol* element;
-				if (al.argumentList !is null && al.argumentList.items.length > 0)
-				{
-					if (!evalNode(al.argumentList.items[0], element))
-						return false;
-				}
-				else
-					element = lookupInitializerBase(internString("void"),
-						symbol, moduleScope, mapping);
-				value = arrayLiteralSymbol(element);
-				return true;
-			}
-			// `(expr)`: the parser records the parenthesised expression (as
-			// the one-item list the `Expression` node holds) in the primary.
-			if (primary.expression !is null)
-				return evalNode(primary.expression, value);
-			return evalInitializerPrimary(primary, symbol, moduleScope, mapping, value);
-		}
-
-		return false;
-	}
-
-	handled = evalNode(expression, result);
+	auto resolved = evalInitializerExpr(expression, symbol, moduleScope, cache, mapping);
+	handled = resolved.handled;
+	result = resolved.value;
+	qualifiers = resolved.qualifiers;
 }
 
 /// Resolves a primary expression: an identifier / template instance, a builtin
