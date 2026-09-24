@@ -23,7 +23,7 @@
  */
 module dsymbol.conversion.second.declared_type;
 
-import dsymbol.conversion.second : memberStep, resolveInitializerNode, typeSwap;
+import dsymbol.conversion.second.initializer : memberStep, resolveInitializerNode, typeSwap;
 import dsymbol.conversion.second.instantiate : instantiateFromNode;
 import dsymbol.deferred : Imports;
 import dsymbol.symbol;
