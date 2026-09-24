@@ -37,32 +37,9 @@ import dparse.ast;
 import dparse.lexer;
 import std.algorithm : filter;
 import std.range;
-import io = std.stdio;
-
-void DBG(F, A...)(F f, A args)
-{
-    //debug io.writeln(f, args);
-}
-package void writeln(F, A...)(F f, A args)
-{
-    //debug io.writeln(f, args);
-}
-
-package void write(F, A...)(F f, A args)
-{
-    //debug io.write(f, args);
-}
-
-void print_tab(int index)
-{
-    //debug index +=1;
-    //debug enum C = 4;
-    //debug for(int i =0; i < index*4; i++) io.write(" ");
-}
 
 void secondPass(SemanticSymbol* rootModule, SemanticSymbol* currentSymbol, Scope* moduleScope, ref ModuleCache cache)
 {
-    writeln("-- second pass: begin");
 	with (CompletionKind) final switch (currentSymbol.acSymbol.kind)
 	{
 	case className:
@@ -166,12 +143,6 @@ void secondPass(SemanticSymbol* rootModule, SemanticSymbol* currentSymbol, Scope
 	default:
 		break;
 	}
-
-    writeln("-- second pass: end");
-    writeln("");
-    writeln("");
-    writeln("");
-    writeln("");
 }
 void resolveImport(DSymbol* rootModule, DSymbol* acSymbol, ref TypeLookups typeLookups,
 	ref ModuleCache cache)
