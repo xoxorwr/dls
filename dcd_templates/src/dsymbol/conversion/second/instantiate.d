@@ -28,7 +28,7 @@
  */
 module dsymbol.conversion.second.instantiate;
 
-import dsymbol.conversion.second : identifierName, resolveTypeNodeValue;
+import dsymbol.conversion.second.declared_type : identifierName, resolveTypeNodeValue;
 import dsymbol.symbol;
 import dsymbol.scope_;
 import dsymbol.signature;

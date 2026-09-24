@@ -24,7 +24,7 @@
  */
 module dsymbol.conversion.second.inheritance;
 
-import dsymbol.conversion.second : identifierName;
+import dsymbol.conversion.second.declared_type : identifierName;
 import dsymbol.conversion.second.instantiate : instantiateFromNode;
 import dsymbol.semantic : TypeLookups;
 import dsymbol.symbol;
