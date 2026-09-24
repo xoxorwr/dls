@@ -527,6 +527,16 @@ class LspClient:
     def workspace_symbols(self, query: str) -> list[dict[str, Any]]:
         return self.request("workspace/symbol", {"query": query})
 
+    def references(
+        self, uri: str, line: int, character: int, include_declaration: bool = True
+    ) -> list[dict[str, Any]]:
+        return self.request(
+            "textDocument/references",
+            self._position_params(
+                uri, line, character, {"context": {"includeDeclaration": include_declaration}}
+            ),
+        )
+
     def signature_help(self, uri: str, line: int, character: int) -> dict[str, Any]:
         return self.request(
             "textDocument/signatureHelp", self._position_params(uri, line, character)
@@ -650,6 +660,13 @@ class Doc:
 
     def definition(self, needle: str, offset: int = 0, occurrence: int = 0):
         return self.client.definition(self.uri, *self.position(needle, offset, occurrence))
+
+    def references(
+        self, needle: str, offset: int = 0, occurrence: int = 0, include_declaration: bool = True
+    ):
+        return self.client.references(
+            self.uri, *self.position(needle, offset, occurrence), include_declaration
+        )
 
     def signature_help(self, needle: str, offset: int = 0, occurrence: int = 0):
         return self.client.signature_help(self.uri, *self.position(needle, offset, occurrence))

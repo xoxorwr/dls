@@ -20,6 +20,7 @@ import dls.completion;
 import dls.signature_help;
 import dls.document_symbols;
 import dls.workspace_symbols;
+import dls.references;
 import dls.definition;
 import dls.hover;
 import dls.semantic_tokens;
@@ -278,6 +279,9 @@ void handle_request(JsonNode* request) {
     }
     else if(strcmp(method, "workspace/symbol") == 0) {
       lsp_workspace_symbol(id, params_json);
+    }
+    else if(strcmp(method, "textDocument/references") == 0) {
+      lsp_references(id, params_json);
     }
     //else if(strcmp(method, "textDocument/definition") == 0) {
     //  lsp_goto_definition(id, params_json);

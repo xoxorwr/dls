@@ -226,3 +226,13 @@ struct Location
 
 extern(C) Location[] dcd_definition(const(char)* filename, const(char)* content, int position);
 extern(C) export string[] dcd_hover(const(char)* filename, const(char)* content, int position);
+
+struct DReferenceLocation
+{
+    string file;
+    size_t location;
+    size_t length;
+}
+
+extern(C) DReferenceLocation[] dcd_find_references(const(char)* filename,
+    const(char)* content, int position, string[] projectPaths, int includeDeclaration);

@@ -1242,6 +1242,188 @@ extern(C) export Location[] dcd_definition(const(char)* filename, const(char)* c
     return ret;
 }
 
+struct DReferenceLocation
+{
+    string file;
+    size_t location;
+    size_t length;
+}
+
+/**
+ * Every occurrence of the symbol at 'filename':'position', across every
+ * module under 'projectPaths' (scoped the same way as 'dcd_workspace_symbols'
+ * - see 'ModuleCache.getWorkspaceSymbols' for why the compiler's own stdlib
+ * paths are deliberately excluded from this eager scan).
+ *
+ * The target is resolved exactly like 'dcd_definition' (same
+ * 'resolveDeferredTypes'/'deps_for' preamble, so cross-module targets are
+ * cached before being compared against), and every symbol it resolves to is
+ * a candidate target - an ambiguous chain (overloads) is treated as "any of
+ * these", not "only the last one".
+ *
+ * Each candidate file is parsed exactly once, whole ('parseWholeFile', the
+ * same trick 'dcd_semantic_tokens' uses to get one scope tree for every name
+ * in the file), and then every identifier token whose text matches a
+ * target's name is resolved against that one parse's scope tree
+ * ('resolveTokenSymbol') instead of reparsing per occurrence - the same
+ * per-token-not-per-position cost profile 'dcd_semantic_tokens' already
+ * pays, not the much heavier per-occurrence reparse a naive implementation
+ * would need.
+ */
+extern(C) export DReferenceLocation[] dcd_find_references(const(char)* filename,
+    const(char)* content, int position, string[] projectPaths, int includeDeclaration)
+{
+    import std.algorithm;
+    import std.array;
+    import std.file : read, FileException;
+    import std.string : indexOf;
+    import containers.hashset;
+    import dcd.server.autocomplete.util;
+
+    import dparse.lexer;
+    import dparse.rollback_allocator;
+
+    import dsymbol.conversion;
+    import dsymbol.modulecache;
+    import dsymbol.scope_;
+    import dsymbol.string_interning;
+    import dsymbol.symbol;
+
+    import dcd.common.constants;
+    import dcd.common.messages;
+
+    DReferenceLocation[] ret;
+    if (content is null)
+        return ret;
+
+    auto p = cast(string) fromStringz(filename);
+    if (p.startsWith("file://"))
+        p = p[7 .. $];
+
+    AutocompleteRequest request;
+    request.fileName = p;
+    request.cursorPosition = position;
+    request.kind |= RequestKind.autocomplete;
+    request.sourceCode = cast(ubyte[]) fromStringz(content);
+    if (request.sourceCode.length == 0)
+        return ret;
+
+    auto im = istring(p);
+    cache.resolveDeferredTypes(im);
+
+    HashSet!istring rg;
+    cache.deps_for(im, rg);
+    foreach(it; rg)
+    {
+        auto ee = cache.getEntryFor(it);
+        if (!ee)
+            cache.cacheModule(it);
+    }
+    cache.resolveDeferredTypes(im);
+
+    RollbackAllocator targetRba;
+    auto targetSc = StringCache(request.sourceCode.length.optimalBucketCount);
+    SymbolStuff stuff = getSymbolsForCompletion(request, CompletionType.location,
+        &targetRba, targetSc, cache);
+    scope(exit) stuff.destroy();
+
+    if (stuff.symbols.length == 0)
+        return ret;
+
+    // (file, location) of every declaration the click could mean, plus the
+    // name (all of them share it, since they all matched the same token
+    // chain) that identifies candidate occurrences worth resolving.
+    static struct TargetKey
+    {
+        string file;
+        size_t location;
+    }
+
+    TargetKey[] targets;
+    string targetName;
+    foreach (sym; stuff.symbols)
+    {
+        targetName = sym.name.data;
+        auto file = sym.symbolFile == "stdin" ? p : sym.symbolFile.data;
+        auto key = TargetKey(file, sym.location);
+        if (!targets.canFind(key))
+            targets ~= key;
+    }
+    if (targetName.length == 0 || targets.length == 0)
+        return ret;
+
+    bool inProject(string file)
+    {
+        foreach (path; projectPaths)
+            if (file.length > path.length && file[0 .. path.length] == path)
+                return true;
+        return false;
+    }
+
+    string[] candidateFiles;
+    foreach (entry; cache.getWorkspaceSymbols(projectPaths))
+        if (inProject(entry.path) && !candidateFiles.canFind(entry.path.data))
+            candidateFiles ~= entry.path.data;
+    // The file being edited may hold unsaved changes the cache does not see,
+    // or may never have been saved at all - always search its live content,
+    // not whatever (if anything) is cached for it on disk.
+    if (inProject(p) && !candidateFiles.canFind(p))
+        candidateFiles ~= p;
+
+    void scanFile(string path, const(ubyte)[] text)
+    {
+        if (text.length == 0)
+            return;
+        if ((cast(string) text).indexOf(targetName) < 0)
+            return;
+
+        auto sc = StringCache(text.length.optimalBucketCount);
+        LexerConfig parserConfig;
+        parserConfig.fileName = "";
+        auto parserTokens = getTokensForParser(cast(ubyte[]) text, parserConfig, &sc);
+
+        RollbackAllocator rba;
+        auto pair = generateAutocompleteTrees(parserTokens, &rba, text.length, cache, true);
+        scope(exit) pair.destroy();
+
+        foreach (i, token; parserTokens)
+        {
+            if (token.type != tok!"identifier" || token.text != targetName)
+                continue;
+
+            auto symbol = resolveTokenSymbol(parserTokens, i, pair.scope_);
+            if (symbol is null)
+                continue;
+
+            auto symFile = symbol.symbolFile == "stdin" ? path : symbol.symbolFile.data;
+            if (!targets.canFind(TargetKey(symFile, symbol.location)))
+                continue;
+
+            if (!includeDeclaration && symbol.location == token.index)
+                continue;
+
+            ret ~= DReferenceLocation(path, token.index, token.text.length);
+        }
+    }
+
+    foreach (path; candidateFiles)
+    {
+        if (path == p)
+        {
+            scanFile(path, request.sourceCode);
+            continue;
+        }
+        try
+        {
+            auto bytes = cast(ubyte[]) read(path);
+            scanFile(path, bytes);
+        }
+        catch (FileException) {}
+    }
+
+    return ret;
+}
+
 
 string from_kind(CompletionKind kind)
 {
