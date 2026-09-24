@@ -218,7 +218,7 @@ do
 			if (renamed)
 			{
 				acSymbol.kind = CompletionKind.aliasName;
-				acSymbol.symbolFile = acSymbol.altFile;
+				acSymbol.symbolFile = acSymbol.altFile().path;
 			}
 
 			// The bind's data has been used: the symbol points at the
@@ -257,7 +257,8 @@ private DSymbol* wrapTypeSymbol(R)(istring marker, SymbolQualifier qualifier, DS
 	auto next = GCAllocator.instance.make!DSymbol(marker, CompletionKind.dummy, inner);
 	next.qualifier = qualifier;
 	next.ownType = false;
-	next.callTip = dimension;
+	if (dimension.length > 0)
+		next.setRenderedText(GCAllocator.instance.make!RenderedText(dimension));
 	next.addChildren(children, false);
 	return next;
 }
@@ -589,6 +590,17 @@ private TypeNodeOutcome resolveDeclaredType(const(Type) type, DSymbol* symbol, T
 			inner, innerMissing);
 		if (outcome == TypeNodeOutcome.unmodelled)
 			return TypeNodeOutcome.unmodelled;
+		// `resolveDeclaredType` only ever resolves a base name -- suffixes
+		// are the caller's job (`resolveTypeFromTypeNode` applies the outer
+		// type's own suffixes once this returns). But the operand written
+		// inside the parens is a full `Type` and may carry suffixes of its
+		// own (`const(T**)`, `immutable(T[])`): `t2.type.typeSuffixes`,
+		// never looked at otherwise, so `**`/`[]` inside a type constructor
+		// was silently dropped along with the qualifier itself, not just the
+		// qualifier -- `const(T**)` resolved as bare `T`, not `T**`.
+		if (outcome == TypeNodeOutcome.resolved)
+			foreach (suffix; t2.type.typeSuffixes)
+				inner = wrapTypeSuffix(inner, suffix);
 		current = inner;
 		missingName = innerMissing;
 		// The operand's own resolution already applied `lookup.ctx` where it
@@ -2083,7 +2095,10 @@ private DSymbol* instantiateSymbol(DSymbol* s, Scope* moduleScope, ref ModuleCac
 		auto next = GCAllocator.instance.make!DSymbol(s.name, s.kind, instantiatedType);
 		next.qualifier = s.qualifier;
 		next.ownType = false;
-		next.callTip = s.callTip;
+		// `RenderedText` is immutable once built, same as `Signature` -- share
+		// the pointer rather than copy the string. Null for a pointer wrapper
+		// (its dimension is always empty, so one was never allocated).
+		next.setRenderedText(s.renderedText());
 		next.addChildren(s.opSlice(), false);
 		return next;
 	}
@@ -2268,7 +2283,6 @@ private DSymbol* instantiateAggregate(DSymbol* s, DSymbol*[] args, istring[] arg
 	instantiated.location = s.location;
 	instantiated.location_end = s.location_end;
 	instantiated.doc = s.doc;
-	instantiated.callTip = s.callTip;
 	instantiated.setSignature(s.signature());
 	instantiated.flags = s.flags;
 
@@ -2363,7 +2377,6 @@ private DSymbol* instantiateAggregate(DSymbol* s, DSymbol*[] args, istring[] arg
 			newPart.location = part.location;
 			newPart.location_end = part.location_end;
 			newPart.doc = part.doc;
-			newPart.callTip = part.callTip;
 			newPart.flags = part.flags;
 			// The signature was built while parsing, from the *generic*
 			// declaration (`V get(K key)`); now that this copy's return type

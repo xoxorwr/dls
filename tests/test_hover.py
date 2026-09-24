@@ -102,6 +102,20 @@ class HoverTests(DlsTestCase):
         text = self._hover_text(doc, "TD!int x;", offset=-len("TD!int x;") + 1)
         self.assertIn("struct TD(T)", text)
 
+    def test_hover_on_a_templated_struct_usage_keeps_the_generic_body(self):
+        """Not a substitution: hovering the type name at a use site
+        (`TD!int x`) shows the *declaration's* body, `T data;`, not `int
+        data;` - true before the migration off `callTip` too
+        (`instantiated.callTip = s.callTip` was already an unconditional
+        copy of the generic string, with no substitution logic), and still
+        true now that `instantiateAggregate` (`second.d`) shares the same
+        `Signature` pointer instead. Pinned so a future change to that
+        sharing doesn't silently start rendering a half-substituted body.
+        """
+        doc = self.open_doc("templated.d")
+        text = self._hover_text(doc, "TD!int x;", offset=-len("TD!int x;") + 1)
+        self.assertIn("T data", text)
+
     def test_hover_on_a_constrained_template_parameter_keeps_the_constraint(self):
         doc = self.open_doc("shapes.d")
         text = self._hover_text(

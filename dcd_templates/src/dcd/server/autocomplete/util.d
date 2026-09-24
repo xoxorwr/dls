@@ -1089,26 +1089,34 @@ AutocompleteResponse.Completion makeSymbolCompletionInfo(const DSymbol* symbol, 
 	}
 	else if (kind == CompletionKind.enumMember)
 		ret.definition = symbol.name; // TODO: add enum value to definition string
-	else if (kind == CompletionKind.structName || kind == CompletionKind.className)
+	else if (kind == CompletionKind.structName || kind == CompletionKind.className
+		|| kind == CompletionKind.unionName)
 	{
 		// `Name(Params)` for a templated aggregate - the parameter list as it
 		// was declared, so a constrained (`T : Base`) or value (`int N`)
 		// parameter comes out whole, in declaration order, without the
-		// body.  A non-templated one keeps its rendered body, which is what
-		// a completion detail shows instead.
+		// body.  A non-templated struct/union always has a `Signature` now
+		// (unlike `className`, which stays templated-only - a class body was
+		// never rendered in the first place), so its `.body` is what a
+		// completion detail shows instead - explicitly here, not through the
+		// generic `else` below, because `unionName` used to fall into that
+		// branch and happened to only get the right answer by accident (a
+		// non-templated union's `signature()` was null, so it fell back to
+		// the old `callTip`; now that it's never null, the generic branch's
+		// `renderSignature` call would wrongly render head-only).
 		auto signature = symbol.signature();
 		if (signature !is null && signature.templateParameters.length > 0)
 			ret.definition = symbol.name.data ~ renderParenthesized(signature.templateParameters);
-		else
-			ret.definition = symbol.callTip;
+		else if (signature !is null)
+			ret.definition = signature.body;
 	}
 	else
 	{
 		// A callable's `definition` is its signature, rendered from the parts
 		// the old call tip had been joined from.
 		auto signature = symbol.signature();
-		ret.definition = signature !is null
-			? renderSignature(signature).label : symbol.callTip;
+		if (signature !is null)
+			ret.definition = renderSignature(signature).label;
 	}
 
 	// TODO: extend completion with more info such as class inheritance

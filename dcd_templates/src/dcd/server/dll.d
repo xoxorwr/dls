@@ -1234,38 +1234,33 @@ extern(C) export string[] dcd_hover(const(char)* filename, const(char)* content,
     {
         foreach(sym; stuff.symbols.uniq)
         {
-            warning("found: ", sym.name, " k:", sym.kind,"  at: ",sym.symbolFile," -> ", sym.location,"\n    ct: ", sym.callTip,"\n");
+            warning("found: ", sym.name, " k:", sym.kind,"  at: ",sym.symbolFile," -> ", sym.location,"\n");
             if (sym.type)
-                warning("  type: ", sym.type.name, " k:", sym.type.kind,"  at: ",sym.type.symbolFile," -> ", sym.type.location,"\n    ct: ", sym.type.callTip,"\n");
+                warning("  type: ", sym.type.name, " k:", sym.type.kind,"  at: ",sym.type.symbolFile," -> ", sym.type.location,"\n");
 
             string value;
 
 
             auto ms = cache.getEntryFor(sym.symbolFile);
-            if (ms && ms.symbol)
+            if (ms && ms.symbol && ms.symbol.renderedText())
             {
-                value ~= ms.symbol.callTip;
+                value ~= ms.symbol.renderedText().text;
                 value ~= "\n";
             }
 
-            if (sym.callTip.length > 0)
+            if (auto signature = sym.signature())
             {
-                value ~= sym.callTip;
-            }
-            else if (auto signature = sym.signature())
-            {
-                // Nothing joined is kept for a callable any more: the line
-                // hover shows is rendered from the signature's parts, which is
-                // also where signature help reads them from.
-                value ~= renderSignature(signature).label;
+                // A callable's line is rendered from the signature's parts,
+                // which is also where signature help reads them from; an
+                // aggregate's is its rendered body, when it has one (a
+                // non-templated `className` never does - see `extra`'s doc
+                // in `symbol.d`).
+                value ~= signature.body.length > 0
+                    ? signature.body : renderSignature(signature).label;
             }
             else
             {
-                if (sym.kind == CompletionKind.structName)
-                    value ~=  sym.callTip[];
-                else if (sym.kind == CompletionKind.unionName)
-                    value ~=  sym.callTip[];
-                else if (sym.kind == CompletionKind.enumName)
+                if (sym.kind == CompletionKind.enumName)
                 {
                     value ~= "enum " ~ sym.name ~ "\n{\n";
                     foreach (child; sym.opSlice())
@@ -1548,10 +1543,11 @@ extern(C) SignatureHelpResponse dcd_get_signature(const(char)* filename, const(c
 	        resolved = resolved.type;
 
 	    // `Name(args)` calls the constructor; `Name!(args)` instantiates the
-	    // template instead, so its own callTip (the "Name(Params)" built by
-	    // createCallTip/formatCallTip) is what belongs here, not the
-	    // constructor's - which is built from the struct's *fields*, not its
-	    // template parameters, and would otherwise show up as this hint.
+	    // template instead, so its own signature (the "Name(Params)" head
+	    // `renderSignature` builds from its `templateList` shape) is what
+	    // belongs here, not the constructor's - which is built from the
+	    // struct's *fields*, not its template parameters, and would
+	    // otherwise show up as this hint.
 	    if (!isTemplateInstantiation &&
 	        (resolved.kind == CompletionKind.structName || resolved.kind == CompletionKind.unionName || resolved.kind == CompletionKind.className))
 	    {

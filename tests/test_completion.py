@@ -222,6 +222,24 @@ struct WithFunctionPointerField
     void function(int) fp;
 }
 
+// A plain (non-templated) union: goes through the same code path as
+// struct/className now, not the generic branch it used to fall into by
+// accident (see docs/problem-calltips.md) - its detail should be exactly
+// "" (a paren-only, no-body shape doesn't apply; `detail` only ever holds
+// a parameter list, never a body - see completion.d's bracket scan).
+union PlainUnion
+{
+    int a;
+    long b;
+}
+
+// A templated union, for symmetry with the templated class above.
+union UnionPair(K, V)
+{
+    K key;
+    V value;
+}
+
 void main()
 {
     Constrained!int a;
@@ -229,6 +247,8 @@ void main()
     Triple!(int, string, bool) c;
     ClassPair!(int, string) d;
     WithFunctionPointerField e;
+    PlainUnion f;
+    UnionPair!(int, string) g;
 }
 """
 
@@ -260,3 +280,15 @@ class TemplateShapeCompletionTests(DlsTestCase):
 
     def test_a_body_only_paren_is_not_mistaken_for_a_parameter_list(self):
         self.assertEqual(self._detail("WithFunctionPointerField"), "")
+
+    def test_a_plain_union_has_no_parameter_list(self):
+        """Regression: `unionName` used to fall into a different code path
+        than `structName`/`className` and only produced the right answer
+        because a non-templated union's signature happened to be null; once
+        every union always has one, that path would wrongly render
+        head-only. See docs/problem-calltips.md.
+        """
+        self.assertEqual(self._detail("PlainUnion"), "")
+
+    def test_a_templated_union_also_gets_an_ordered_parameter_list(self):
+        self.assertEqual(self._detail("UnionPair"), "(K, V)")

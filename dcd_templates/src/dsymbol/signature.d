@@ -66,6 +66,46 @@ struct Signature
 	/// A trailing `...` varargs marker is one entry, exactly as the formatter
 	/// spelled it inside the old call tip.
 	istring[] parameters;
+
+	/// An aggregate's full rendered body (`"struct Name(T) {\n    T data;\n}"`).
+	/// Only `structName`/`unionName` populate this; empty for every other
+	/// shape/use -- `className` still only carries the bare `templateList`
+	/// head (see `symbol.d`'s `extra` doc), a class body was never flattened
+	/// into a display string in the first place, and that stays out of scope
+	/// here. Hover reads this directly (the callable/function-type shapes
+	/// render through `renderSignature` instead, since they have no body).
+	istring body;
+}
+
+/**
+ * A precomputed display string behind `DSymbol.extra`, for the symbol shapes
+ * that need one but not a full `Signature` -- meaning fixed by the symbol's
+ * `kind`/`name`/`qualifier` the same way `Signature` itself is, read through
+ * `DSymbol.renderedText()`. Three unrelated contexts share this one shape,
+ * since none of them need more structure than "a string":
+ *
+ * - An array's dimension (`"3"` in `int[3]`, empty for a dynamic array) --
+ *   the `ARRAY_SYMBOL_NAME` dummy wrapper symbol.
+ * - An assoc-array's key type (`"string"` in `int[string]`) -- the
+ *   `ASSOC_ARRAY_SYMBOL_NAME` dummy wrapper symbol.
+ * - The module declaration line (`"module a.b.c;"`) -- the root module
+ *   symbol (`kind == CompletionKind.moduleName`).
+ */
+struct RenderedText
+{
+	istring text;
+}
+
+/**
+ * An alternate source file for a renamed selective import (`import m : b =
+ * c;`), stashed on the `importSymbol` across the two-pass resolution in
+ * `second.d` so the second pass can find where `c` actually lives. Not
+ * display text -- read/written through `DSymbol.altFile()`/`setAltFile()`,
+ * never rendered.
+ */
+struct AltFile
+{
+	istring path;
 }
 
 /**

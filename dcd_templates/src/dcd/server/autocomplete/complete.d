@@ -1394,7 +1394,7 @@ void setCompletions(T)(ref AutocompleteResponse response, ref ModuleCache cache,
 		enforce(callTipHint != CalltipHint.none, "Make sure to have a properly defined calltipHint!");
 		//trace("Showing call tips for ", symbols[0].name, " of kind ", symbols[0].kind);
 		if (symbols[0].kind != CompletionKind.functionName
-			&& symbols[0].callTip is null)
+			&& symbols[0].signature() is null)
 		{
 			if (symbols[0].kind == CompletionKind.aliasName)
 			{
@@ -1462,10 +1462,11 @@ void setCompletions(T)(ref AutocompleteResponse response, ref ModuleCache cache,
 		response.completionType = CompletionType.calltips;
 		foreach (symbol; symbols)
 		{
-			// A callable has a signature, an aggregate its rendered body;
-			// either is something to show, an alias is not.
+			// A callable has a signature, an aggregate its rendered body -
+			// both now live on `signature()`; either is something to show,
+			// an alias is not.
 			if (symbol.kind != CompletionKind.aliasName
-				&& (symbol.signature() !is null || symbol.callTip !is null))
+				&& symbol.signature() !is null)
 			{
 				auto completion = makeSymbolCompletionInfo(symbol, char.init);
 				// TODO: put return type

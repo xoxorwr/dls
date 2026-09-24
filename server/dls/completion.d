@@ -129,15 +129,16 @@ void lsp_completion(int id, JsonNode * params_json) {
                 }
             }
         }
-        else if (completion.kind == 's' || completion.kind == 'c')
+        else if (completion.kind == 's' || completion.kind == 'c' || completion.kind == 'u')
         {
 
         	//LWARN(">{} {}", identifier, completion.definition);
             int bracketI = mem.index_of(completion.definition, "{");
             int firstParenI = mem.index_of(completion.definition, "(");
-            // A templated struct/class's definition is just "Name(Params)"
-            // with no body at all (see makeSymbolCompletionInfo's
-            // structName/className branch) - unlike a non-templated one,
+            // A templated struct/class/union's definition is just
+            // "Name(Params)" with no body at all (see
+            // makeSymbolCompletionInfo's structName/className/unionName
+            // branch) - unlike a non-templated one,
             // whose definition is its rendered body, so there is no '('
             // before the '{' and this stays empty. The parameter list still
             // has to be closed by bracket matching: it is the one piece of

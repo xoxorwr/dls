@@ -655,7 +655,7 @@ final class FirstPass : ASTVisitor
 			if (i != parts.length-1) ct ~= ".";
 		}
 		ct ~= ";";
-		rootSymbol.acSymbol.callTip = istring(ct);
+		rootSymbol.acSymbol.setRenderedText(GCAllocator.instance.make!RenderedText(istring(ct)));
 	}
 
 	override void visit(const StructBody structBody)
@@ -697,7 +697,7 @@ final class FirstPass : ASTVisitor
 
 		if (currentSymbol.acSymbol.kind == CompletionKind.structName
 				|| currentSymbol.acSymbol.kind == CompletionKind.unionName)
-			createCallTip();
+			renderAggregateBody();
 	}
 
 	override void visit(const ImportDeclaration importDeclaration)
@@ -815,7 +815,7 @@ final class FirstPass : ASTVisitor
 			if (isRenamed)
 			{
 				importSymbol.acSymbol.location = bind.left.index;
-				importSymbol.acSymbol.altFile = symbolFile;
+				importSymbol.acSymbol.setAltFile(GCAllocator.instance.make!AltFile(symbolFile));
 			}
 
 			importSymbol.acSymbol.qualifier = SymbolQualifier.selectiveImport;
@@ -1082,7 +1082,14 @@ private:
 		}
 	}
 
-	void createCallTip()
+	/**
+	 * Renders a struct/union's full body (`"struct Name(T) {\n    T data;\n}"`)
+	 * and stores it on the `Signature` `visitAggregateDeclaration` already
+	 * created for this symbol (unconditionally, for these two kinds -- see
+	 * its comment). Called once `StructBody` closes, so every field has
+	 * already been visited and collected into `structFieldTypes`/Names/Static.
+	 */
+	void renderAggregateBody()
 	{
 		import std.range : zip;
 
@@ -1139,7 +1146,20 @@ private:
 		}
 
 		app.put("}");
-		currentSymbol.acSymbol.callTip = istring(app.data);
+		// `visitAggregateDeclaration` always creates one for structName/
+		// unionName reached through it, regardless of templating -- but an
+		// anonymous struct/union (`handleAnonStructVariable`) builds its
+		// symbol directly and never goes through that path, so it still
+		// needs one created here.
+		auto signature = currentSymbol.acSymbol.signature();
+		if (signature is null)
+		{
+			signature = GCAllocator.instance.make!Signature();
+			signature.shape = SignatureShape.templateList;
+			signature.name = currentSymbol.acSymbol.name;
+			currentSymbol.acSymbol.setSignature(signature);
+		}
+		signature.body = istring(app.data);
 	}
 
 	void pushScope(size_t startLocation, size_t endLocation)
@@ -1262,20 +1282,31 @@ private:
 		processTemplateParameters(currentSymbol, dec.templateParameters);
 
 		// The declaration's template parameter list, kept structurally: it is
-		// what `createCallTip` spells into the struct body's head, what a
-		// `Name!(...)` signature hint shows, and what a struct/class
-		// completion's detail is built from.  Only templated aggregates get
-		// one -- a plain `struct Foo` has nothing structured to say.
+		// what a `Name!(...)` signature hint shows and what a struct/class/
+		// union completion's detail is built from. A struct/union always
+		// gets one now -- `renderAggregateBody` (called once its `StructBody`
+		// closes) fills in `.body` on this same `Signature`, whether or not
+		// it is templated, since that used to be the whole of what `callTip`
+		// held for these two kinds. A class/interface/template still only
+		// gets one when templated -- a plain `struct Foo` has an (empty
+		// template parameter list, has a) body to show; a plain `class Foo`
+		// never had a rendered body in the first place, and that stays out
+		// of scope here.
+		istring[] declaredTemplateParameters;
 		if (auto templateParameters = dec.templateParameters)
 			if (templateParameters.templateParameterList !is null
 				&& templateParameters.templateParameterList.items.length > 0)
-			{
-				auto signature = GCAllocator.instance.make!Signature();
-				signature.shape = SignatureShape.templateList;
-				signature.name = currentSymbol.acSymbol.name;
-				signature.templateParameters = renderTemplateParameters(templateParameters);
-				currentSymbol.acSymbol.setSignature(signature);
-			}
+				declaredTemplateParameters = renderTemplateParameters(templateParameters);
+
+		if (declaredTemplateParameters.length > 0
+			|| kind == CompletionKind.structName || kind == CompletionKind.unionName)
+		{
+			auto signature = GCAllocator.instance.make!Signature();
+			signature.shape = SignatureShape.templateList;
+			signature.name = currentSymbol.acSymbol.name;
+			signature.templateParameters = declaredTemplateParameters;
+			currentSymbol.acSymbol.setSignature(signature);
+		}
 
 		dec.accept(this);
 	}

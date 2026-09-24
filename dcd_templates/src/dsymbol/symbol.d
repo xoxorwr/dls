@@ -188,6 +188,14 @@ struct DSymbol
         this.flags = Flags.init;
         this.flags.deleted = 1;
         this.type = null;
+        // Not a destroy() -- `extra` may be shared with other symbols
+        // (instantiateSymbol/instantiateAggregate copy the pointer, not the
+        // payload; see its doc above). Just drop this symbol's own
+        // reference so the GC can collect the payload once nothing else
+        // points at it, instead of leaving a stale pointer to freed-looking
+        // memory sitting in a `deleted` symbol.
+        this.extra = null;
+        this.extraKind = ExtraKind.none;
 	}
 
 	ptrdiff_t opCmp(ref const DSymbol other) const pure nothrow @nogc @safe
@@ -407,48 +415,93 @@ struct DSymbol
 	istring name;
 
 	/**
-	 * Calltip to display if this is a function
-	 */
-	istring callTip;
-
-	/**
 	 * Kind-specific payload; the meaning is fixed by `kind` (and, for the
-	 * `qualifier == func` type symbols, by that qualifier).  Null when the
-	 * symbol has none.
+	 * `qualifier == func` type symbols, by that qualifier), never by casting
+	 * `extra` at the call site -- always go through the typed accessor below
+	 * that matches the context you already know you're in. Null when the
+	 * symbol has none. Built while the module's AST is still alive and
+	 * immutable afterwards, so several symbols may share one payload
+	 * (`instantiateSymbol` copies the pointer rather than the content). The
+	 * payload is GC-allocated and so is not freed here.
 	 *
-	 * One payload kind exists today: a `Signature` for the symbols that carry
-	 * one -- `functionName` (functions, constructors, destructors, function
-	 * literals), the `qualifier == func` type symbols of `T function(Args)`
-	 * types, and aggregates whose declaration has template parameters.  It is
-	 * built while the module's AST is still alive and is immutable afterwards,
-	 * so several symbols may share one (`instantiateSymbol` copies rather than
-	 * mutates).  The payload is GC-allocated and so is not freed here.
+	 * Three payload kinds exist, mutually exclusive per symbol (nothing here
+	 * ever needs two at once):
 	 *
-	 * This is what `callTip` should have been for those symbols: the string
-	 * flattened a signature that three different features wanted the parts of
-	 * back.  Read it through `signature()`, never by casting `extra` at the
-	 * call site.
+	 * - `Signature`, read through `signature()` -- `functionName` (functions,
+	 *   constructors, destructors, function literals), the `qualifier ==
+	 *   func` type symbols of `T function(Args)` types, `structName`/
+	 *   `unionName` (always, including its rendered body -- see
+	 *   `Signature.body`), and `className`/`interfaceName` only when
+	 *   templated (no body; a class/interface body was never flattened into
+	 *   a display string).
+	 * - `RenderedText`, read through `renderedText()` -- the array-dimension
+	 *   and assoc-array-key dummy wrapper symbols (`ARRAY_SYMBOL_NAME`/
+	 *   `ASSOC_ARRAY_SYMBOL_NAME`), and the root module symbol's declaration
+	 *   line (`kind == CompletionKind.moduleName`).
+	 * - `AltFile`, read through `altFile()` -- a renamed selective import's
+	 *   alternate source file (`kind == CompletionKind.importSymbol`); not
+	 *   display text.
+	 *
+	 * `extraKind` tags which one `extra` actually holds, so a caller that
+	 * reaches a symbol through a path generic enough not to already know its
+	 * shape (a `kind`-independent branch that happens to run for a
+	 * `functionName` *and* a `moduleName` alike, say) gets `null` back
+	 * instead of the wrong payload's bytes reinterpreted as the wrong
+	 * struct -- cheaper than auditing every call site by hand, and it stays
+	 * correct as new call sites are added.
 	 */
 	private void* extra;
+	private ExtraKind extraKind;
+
+	private enum ExtraKind : ubyte { none, signature, renderedText, altFile }
 
 	/**
-	 * Returns: this symbol's structured signature, or null when it has none.
+	 * Returns: this symbol's structured signature, or null when it has none
+	 * (including when `extra` holds a different payload kind).
 	 */
 	Signature* signature() const nothrow @nogc
 	{
-		return cast(Signature*) extra;
+		return extraKind == ExtraKind.signature ? cast(Signature*) extra : null;
 	}
 
 	/// ditto
 	void setSignature(Signature* signature) nothrow @nogc @safe
 	{
 		extra = signature;
+		extraKind = signature is null ? ExtraKind.none : ExtraKind.signature;
 	}
 
 	/**
-	 * Used for storing information for selective renamed imports
+	 * Returns: this symbol's precomputed display text, or null when it has
+	 * none. See `extra`'s doc for which symbol shapes use this.
 	 */
-	alias altFile = callTip;
+	RenderedText* renderedText() const nothrow @nogc
+	{
+		return extraKind == ExtraKind.renderedText ? cast(RenderedText*) extra : null;
+	}
+
+	/// ditto
+	void setRenderedText(RenderedText* renderedText) nothrow @nogc @safe
+	{
+		extra = renderedText;
+		extraKind = renderedText is null ? ExtraKind.none : ExtraKind.renderedText;
+	}
+
+	/**
+	 * Returns: the alternate source file stashed on a renamed selective
+	 * import, or null when there is none.
+	 */
+	AltFile* altFile() const nothrow @nogc
+	{
+		return extraKind == ExtraKind.altFile ? cast(AltFile*) extra : null;
+	}
+
+	/// ditto
+	void setAltFile(AltFile* altFile) nothrow @nogc @safe
+	{
+		extra = altFile;
+		extraKind = altFile is null ? ExtraKind.none : ExtraKind.altFile;
+	}
 
 	/**
 	 * Module containing the symbol.
@@ -595,7 +648,7 @@ struct DSymbol
 		{
 			if (type) // try to give return type symbol
 				return type.formatType();
-			else // null if unresolved, user can manually pick .name or .callTip if needed
+			else // null if unresolved, user can manually pick .name or .signature() if needed
 				return null;
 		}
 		else if (name == POINTER_SYMBOL_NAME)
@@ -607,14 +660,17 @@ struct DSymbol
 		}
 		else if (name == ARRAY_SYMBOL_NAME)
 		{
+			auto dim = renderedText();
+			string dimText = dim ? dim.text : "";
 			if (!type)
-				return "[" ~ callTip ~ "]" ~ suffix;
+				return "[" ~ dimText ~ "]" ~ suffix;
 			else
-				return type.formatType("[" ~ callTip ~ "]" ~ suffix);
+				return type.formatType("[" ~ dimText ~ "]" ~ suffix);
 		}
 		else if (name == ASSOC_ARRAY_SYMBOL_NAME)
 		{
-			string key = callTip.length ? callTip : "...";
+			auto dim = renderedText();
+			string key = (dim && dim.text.length) ? dim.text : "...";
 			if (!type)
 				return "[" ~ key ~ "]" ~ suffix;
 			else
