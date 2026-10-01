@@ -137,6 +137,9 @@ enum SymbolQualifier : ubyte
 	pointer,
 	/// The symbol is templated
 	templated,
+	/// The symbol stands for one of several types (`cond ? a : b`); its parts
+	/// *are* those types, not members of one.
+	oneOf,
 }
 
 /**
@@ -258,6 +261,17 @@ struct DSymbol
 		// follow aliases
 		if (kind == CompletionKind.aliasName && this.type) {
 			return type.getParts!OR(name, app, visited, onlyOne);
+		}
+
+		// `cond ? a : b`: the parts are the candidate types, so a lookup goes
+		// into each of them instead of into members of one type.  Keeping them
+		// as parts (rather than flattening their members here) is what lets a
+		// caller still tell which candidate a member came from.
+		if (qualifier == SymbolQualifier.oneOf)
+		{
+			foreach (part; parts[])
+				part.ptr.getParts!OR(name, app, visited, onlyOne);
+			return;
 		}
 
 		if (name is null)
@@ -702,6 +716,17 @@ struct DSymbol
 			// TODO: include template parameters
 			return name ~ suffix;
 		}
+	}
+
+	/**
+	 * `formatType`, with the plain name as the fallback when there is no type
+	 * to format (an unresolved callable).  For the places that have to name a
+	 * symbol before anything has resolved - the branches of a `cond ? a : b`.
+	 */
+	string displayTypeName() const
+	{
+		auto formatted = formatType();
+		return formatted.length > 0 ? formatted : name.data;
 	}
 }
 

@@ -165,6 +165,15 @@ package istring[24] builtinTypeNames;
 @("super") istring SUPER_SYMBOL_NAME;
 
 /**
+ * The one type property that is a value of the type itself (`T.init`), unlike
+ * `T.sizeof` / `T.stringof` / `T.mangleof`, which are values of another type.
+ * A member step landing on the built-in `init` is worth the type it was taken
+ * on, so `cond ? make_weapon() : Character.init` is a `Character` on that
+ * branch rather than a symbol named `init`.
+ */
+@("init") istring INIT_SYMBOL_NAME;
+
+/**
  * Translates the IDs for built-in types into an interned string.
  */
 istring getBuiltinTypeName(IdType id) nothrow @nogc @safe

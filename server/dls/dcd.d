@@ -114,6 +114,11 @@ struct AutocompleteResponse {
          * Otherwise (probably) empty.
          */
         string typeOf;
+        /**
+         * Which of several candidate types this item came from, when the
+         * receiver was a `cond ? a : b` value (`TypeA`); empty otherwise.
+         */
+        string origin;
     }
 
     /**

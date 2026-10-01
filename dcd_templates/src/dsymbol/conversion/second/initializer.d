@@ -376,13 +376,22 @@ private InitializerResolution evalInitializerExpr(const(BaseNode) e, DSymbol* sy
 
 	if (auto ternary = cast(const(TernaryExpression)) e)
 	{
-		// The first branch that is not a bare `null`.
-		if (ternary.expression !is null && !isNullLiteral(ternary.expression))
-			return evalInitializerExpr(ternary.expression, symbol, moduleScope, cache, mapping);
-		if (ternary.ternaryExpression !is null)
-			return evalInitializerExpr(ternary.ternaryExpression, symbol, moduleScope, cache,
-				mapping);
-		return InitializerResolution.init;
+		// `cond ? a : b`: either side may be the one that runs, so both are
+		// candidates -- `oneOfSymbol` keeps them both when they differ.  A
+		// branch that is a bare `null`, or that does not resolve, contributes
+		// nothing and the other side stands alone, exactly as it used to.
+		auto thenBranch = ternary.expression !is null && !isNullLiteral(ternary.expression)
+			? evalInitializerExpr(ternary.expression, symbol, moduleScope, cache, mapping)
+			: InitializerResolution.init;
+		auto elseBranch = ternary.ternaryExpression !is null
+			? evalInitializerExpr(ternary.ternaryExpression, symbol, moduleScope, cache, mapping)
+			: InitializerResolution.init;
+		if (thenBranch.value is null)
+			return elseBranch;
+		if (elseBranch.value is null)
+			return thenBranch;
+		return InitializerResolution(oneOfSymbol(thenBranch.value, elseBranch.value), true,
+			TypeConstructorFlags.init);
 	}
 
 	if (auto primary = cast(const(PrimaryExpression)) e)
@@ -663,6 +672,11 @@ package DSymbol* memberStep(DSymbol* current, istring name, Scope* moduleScope)
 	// TODO: hack because of templates, perhaps we copy/assign the type to a part?
 	if (found is null && type !is null)
 		found = type.getFirstPartNamed(name);
+	// `T.init` is a value of `T`, not the built-in `init` property symbol the
+	// member lookup lands on: without this, the initializer reads a type named
+	// `init` (`cond ? make_weapon() : Character.init` hovers as `Weapon | init`).
+	if (found !is null && name == INIT_SYMBOL_NAME && found.kind == CompletionKind.keyword)
+		return current;
 	if (found !is null && found.type is null && found.typeSymbolName.length > 0)
 	{
 		auto resolved = moduleScope.getFirstSymbolByNameAndCursor(found.typeSymbolName,
@@ -699,6 +713,35 @@ private DSymbol* arrayLiteralSymbol(DSymbol* element)
 		CompletionKind.dummy, element);
 	arr.qualifier = SymbolQualifier.array;
 	return arr;
+}
+
+/**
+ * `cond ? a : b` -- one symbol standing for either type.
+ *
+ * Its name is what `formatType` reports (`TypeA | TypeB`), so the variable's
+ * hover and completion entry say which types are in play, and its parts are
+ * the two candidate symbols themselves, so member completion can walk both
+ * and still know which one each member came from (`getParts`).
+ *
+ * `a` alone when both sides name the same type -- a plain `cond ? x : x` must
+ * not look ambiguous.
+ */
+private DSymbol* oneOfSymbol(DSymbol* a, DSymbol* b)
+{
+	// Each side is brought to a *type* the same way the single-branch path
+	// does (`followAlias` off, so `string` keeps its own name): the values
+	// coming in are symbols the expression named, which for `cond ? a : b` on
+	// two variables are the variables themselves.
+	typeSwap(a, false);
+	typeSwap(b, false);
+	if (a is b)
+		return a;
+	auto name = a.displayTypeName() ~ " | " ~ b.displayTypeName();
+	auto sym = GCAllocator.instance.make!DSymbol(internString(name), CompletionKind.dummy, null);
+	sym.qualifier = SymbolQualifier.oneOf;
+	sym.addChild(a, false);
+	sym.addChild(b, false);
+	return sym;
 }
 
 /// The address-of step (`&x`) -- the crumb walk's `POINTER_SYMBOL_NAME` branch.

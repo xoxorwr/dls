@@ -1195,19 +1195,52 @@ void setCompletions(T)(ref AutocompleteResponse response, ref ModuleCache cache,
 	CompletionType completionType, CalltipHint callTipHint = CalltipHint.none,
 	string partial = null)
 {
-	static void addSymToResponse(const(DSymbol)* s, ref AutocompleteResponse r, string p, Scope* completionScope, size_t[] circularGuard = [], CompletionType completionType = CompletionType.identifiers)
+	/// `makeSymbolCompletionInfo` plus the candidate type the item came from.
+	static AutocompleteResponse.Completion withOrigin(AutocompleteResponse.Completion info, string origin)
+	{
+		info.origin = origin;
+		return info;
+	}
+
+	/**
+	 * True when an identical item is already in the response.  A `cond ? a : b`
+	 * walks the same member once per candidate, and only the candidates the
+	 * member really differs between are worth two entries -- identical ones
+	 * collapse into one whose origin names both (an inherited `alignof` is not
+	 * made more useful by appearing twice).
+	 */
+	static bool alreadyPresent(ref AutocompleteResponse r, const(DSymbol)* sym, string origin)
+	{
+		foreach (ref existing; r.completions)
+		{
+			// Cheap check first; building the item to compare definitions is
+			// only worth it once the name and kind line up.
+			if (existing.identifier != sym.name || existing.kind != sym.kind)
+				continue;
+			auto info = makeSymbolCompletionInfo(sym, sym.kind);
+			if (existing.definition != info.definition)
+				continue;
+			if (origin.length > 0 && !existing.origin.canFind(origin))
+				existing.origin = existing.origin.length == 0
+					? origin : existing.origin ~ " | " ~ origin;
+			return true;
+		}
+		return false;
+	}
+
+	static void addSymToResponse(const(DSymbol)* s, ref AutocompleteResponse r, string p, Scope* completionScope, size_t[] circularGuard = [], CompletionType completionType = CompletionType.identifiers, string origin = null)
 	{
 		if (circularGuard.canFind(cast(size_t) s))
 			return;
 
 		if (s.qualifier == SymbolQualifier.pointer && s.type !is null)
 		{
-			addSymToResponse(s.type, r, p, completionScope, circularGuard ~ (cast(size_t) s), completionType);
+			addSymToResponse(s.type, r, p, completionScope, circularGuard ~ (cast(size_t) s), completionType, origin);
 		}
 
 		if (s.kind == CompletionKind.aliasName && s.type !is null)
 		{
-			addSymToResponse(s.type, r, p, completionScope, circularGuard ~ (cast(size_t) s), completionType);
+			addSymToResponse(s.type, r, p, completionScope, circularGuard ~ (cast(size_t) s), completionType, origin);
 			return;
 		}
 
@@ -1222,17 +1255,7 @@ void setCompletions(T)(ref AutocompleteResponse response, ref ModuleCache cache,
 			if (sym.name !is null && sym.name.length > 0 && isPublicCompletionKind(sym.kind)
 				&& !sym.generated
 				&& (p is null ? true : sym.name.data.startsWith(p))
-				&& !r.completions.canFind!((a) {
-					// this filters out similar symbols
-					// this is needed because similar symbols can exist do to version conditionals
-					// fast check first, only compare full definition if it matches
-					bool same = a.identifier == sym.name && a.kind == sym.kind;
-					if (same) {
-						auto info = makeSymbolCompletionInfo(sym, sym.kind);
-						if (info.definition != a.definition) same = false;
-					}
-					return same;
-				})
+				&& !alreadyPresent(r, sym, origin)
 				&& sym.name[0] != '*'
 				&& mightBeRelevantInCompletionScope(sym, completionScope))
 			{
@@ -1240,7 +1263,7 @@ void setCompletions(T)(ref AutocompleteResponse response, ref ModuleCache cache,
 				{
 					if (sym.kind == CompletionKind.memberVariableName && sym.qualifier != SymbolQualifier.templated)
 					{
-						r.completions ~= makeSymbolCompletionInfo(sym, sym.kind);
+						r.completions ~= withOrigin(makeSymbolCompletionInfo(sym, sym.kind), origin);
                         warning("    ADDED struct member: ", sym.name);
 					}
                     else
@@ -1250,7 +1273,7 @@ void setCompletions(T)(ref AutocompleteResponse response, ref ModuleCache cache,
 				}
 				else
 				{
-					r.completions ~= makeSymbolCompletionInfo(sym, sym.kind);
+					r.completions ~= withOrigin(makeSymbolCompletionInfo(sym, sym.kind), origin);
 				}
 			}
             else if (completionType == CompletionType.structMembers)
@@ -1265,7 +1288,7 @@ void setCompletions(T)(ref AutocompleteResponse response, ref ModuleCache cache,
             }
 
 			if (sym.kind == CompletionKind.importSymbol && !sym.skipOver && sym.type !is null)
-				addSymToResponse(sym.type, r, p, completionScope, circularGuard ~ (cast(size_t) s), completionType);
+				addSymToResponse(sym.type, r, p, completionScope, circularGuard ~ (cast(size_t) s), completionType, origin);
 		}
 	}
 
@@ -1386,7 +1409,16 @@ void setCompletions(T)(ref AutocompleteResponse response, ref ModuleCache cache,
 		//	}
 		//}
 
-		addSymToResponse(symbols[0], response, partial, completionScope, [], completionType);
+		if (symbols[0].qualifier == SymbolQualifier.oneOf)
+		{
+			// Either candidate can be the type at runtime, so both sets of
+			// members are offered, each tagged with the type it came from.
+			foreach (candidate; symbols[0].parts[])
+				addSymToResponse(candidate.ptr, response, partial, completionScope, [],
+					completionType, candidate.ptr.displayTypeName());
+		}
+		else
+			addSymToResponse(symbols[0], response, partial, completionScope, [], completionType);
 		response.completionType = completionType;
 	}
 	else if (completionType == CompletionType.calltips)

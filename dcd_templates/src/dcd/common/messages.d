@@ -168,6 +168,12 @@ struct AutocompleteResponse
 		 * Otherwise (probably) empty.
 		 */
 		string typeOf;
+		/**
+		 * Which of several candidate types this item came from, when the
+		 * receiver was a `cond ? a : b` value (`TypeA`); empty for every other
+		 * item.  Display only - the member is the same either way.
+		 */
+		string origin;
 	}
 
 	/**
@@ -210,4 +216,3 @@ struct AutocompleteResponse
 		return response;
 	}
 }
-

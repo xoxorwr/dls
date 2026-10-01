@@ -215,6 +215,21 @@ void lsp_completion(int id, JsonNode * params_json) {
         	}
         }
 
+        // `cond ? a : b`: which candidate type the member came from.  It has to
+        // ride in the inline detail - item-level `detail` alone only reaches
+        // the documentation pane, which is easy to miss.
+        if (completion.origin.length > 0)
+        {
+            char[] sep = cast(char[]) " from ";
+            auto combined = allocator.alloc!(char)(rtype.length + sep.length
+                + completion.origin.length);
+            memcpy(combined.ptr, rtype.ptr, rtype.length);
+            memcpy(combined.ptr + rtype.length, sep.ptr, sep.length);
+            memcpy(combined.ptr + rtype.length + sep.length,
+                completion.origin.ptr, completion.origin.length);
+            rtype = combined;
+        }
+
         auto item = json.create_object();
 
         json.add_string_to_object(item, "label", mem.dupe_add_sentinel(allocator, completion.identifier).ptr);
@@ -225,6 +240,12 @@ void lsp_completion(int id, JsonNode * params_json) {
 
         json.add_string_to_object(labelDetails, "detail", detail.length == 0 ? "" :  mem.dupe_add_sentinel(allocator, detail).ptr);
         json.add_string_to_object(labelDetails, "description", rtype.length == 0 ? "" : mem.dupe_add_sentinel(allocator, rtype).ptr);
+
+        // Which candidate type a `cond ? a : b` member came from; omitted for
+        // every other item so the wire format is unchanged elsewhere.
+        if (completion.origin.length > 0)
+            json.add_string_to_object(item, "detail",
+                mem.dupe_add_sentinel(allocator, completion.origin).ptr);
 
         json.add_item_to_array(results, item);
 
