@@ -1439,6 +1439,33 @@ string from_kind(CompletionKind kind)
     }
 }
 
+/**
+ * Cursor on an `auto` keyword -> the offset of the name it declares, so the
+ * lookup resolves the value there; `auto` itself names nothing.  Every other
+ * position comes back unchanged.
+ */
+private size_t autoKeywordLookup(const(ubyte)[] sourceCode, size_t position)
+{
+    auto cache = StringCache(sourceCode.length.optimalBucketCount);
+    LexerConfig config;
+    config.fileName = "";
+    auto tokens = getTokensForParser(cast(ubyte[]) sourceCode, config, &cache);
+    foreach (i, token; tokens)
+    {
+        if (token.index > position)
+            break;
+        auto length = token.text is null ? str(token.type).length : token.text.length;
+        if (position >= token.index + length)
+            continue;
+        if (token.type != tok!"auto")
+            break;
+        foreach (candidate; tokens[i + 1 .. $])
+            if (candidate.type == tok!"identifier")
+                return candidate.index;
+    }
+    return position;
+}
+
 extern(C) export string[] dcd_hover(const(char)* filename, const(char)* content, int position)
 {
     import std.algorithm;
@@ -1488,8 +1515,21 @@ extern(C) export string[] dcd_hover(const(char)* filename, const(char)* content,
 
     RollbackAllocator rba;
     auto sc = StringCache(request.sourceCode.length.optimalBucketCount);
+    auto lookup = autoKeywordLookup(request.sourceCode, position);
+    request.cursorPosition = lookup;
     SymbolStuff stuff = getSymbolsForCompletion(request, CompletionType.location, &rba, sc, cache);
     scope(exit) stuff.destroy();
+
+    // `auto next = make();` answers with the type's own text, the definition
+    // the `MoveState` of `MoveState next = make();` would show.
+    if (lookup != position)
+        foreach (ref sym; stuff.symbols)
+        {
+            auto type = sym.type;
+            if (sym.signature() is null && type !is null && type !is sym
+                && type.signature() !is null && type.signature().body.length > 0)
+                sym = type;
+        }
 
     string[] ret;
     if (stuff.symbols.length > 0)

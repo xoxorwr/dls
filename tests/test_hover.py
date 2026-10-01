@@ -135,3 +135,88 @@ class HoverTests(DlsTestCase):
             offset=-len("struct Triple(A, B, C)") + len("struct ") + 1,
         )
         self.assertIn("struct Triple(A, B, C)", text)
+
+
+AUTO_HOVER = """module auto_hover;
+
+struct MoveState
+{
+    int slot;
+    int seq;
+}
+
+struct Widget
+{
+    int size;
+}
+
+Widget global_widget;
+
+Widget make_widget()
+{
+    return global_widget;
+}
+
+auto shortened() => global_widget;
+
+MoveState move_state(int slot, int seq)
+{
+    return MoveState();
+}
+
+void main()
+{
+    auto next = move_state(1, 2);
+    auto w = make_widget();
+    auto s = shortened();
+    auto p = &global_widget;
+    next.slot
+    w.size
+    s.size
+    p.size
+}
+"""
+
+
+class AutoKeywordHoverTests(DlsTestCase):
+    """`auto x = <expr>;` hovers like the spelled-out `MoveState x = <expr>;`:
+    the type's definition, not `auto`'s own (empty) lookup."""
+
+    PROJECT = {"auto_hover.d": AUTO_HOVER}
+
+    def _hover_char(self, doc, needle, char):
+        result = doc.hover(needle, offset=char - len(needle))
+        contents = result["contents"]
+        self.assertTrue(contents, f"hover on {needle!r} returned nothing")
+        return "\n".join(entry["value"] for entry in contents)
+
+    def test_hover_on_auto_shows_the_type_definition(self):
+        doc = self.open_doc("auto_hover.d")
+        # On the 'u' of the `auto` introducing `next`.
+        text = self._hover_char(doc, "auto next = move_state", 1)
+        self.assertIn("struct MoveState", text)
+        self.assertIn("int slot;", text)
+        self.assertIn("int seq;", text)
+
+    def test_hover_on_auto_matches_the_type_name(self):
+        doc = self.open_doc("auto_hover.d")
+        keyword = self._hover_char(doc, "auto next = move_state", 1)
+        type_name = self._hover_char(doc, "MoveState move_state", 1)
+        self.assertEqual(keyword, type_name)
+
+    def test_hover_on_auto_across_an_inferred_call(self):
+        doc = self.open_doc("auto_hover.d")
+        text = self._hover_char(doc, "auto s = shortened", 1)
+        self.assertIn("struct Widget", text)
+        self.assertIn("int size;", text)
+
+    def test_hover_on_auto_of_a_pointer_keeps_the_pointer(self):
+        doc = self.open_doc("auto_hover.d")
+        text = self._hover_char(doc, "auto p = &global_widget", 1)
+        self.assertIn("Widget*", text)
+        self.assertNotIn("Widget p", text)
+
+    def test_hover_on_auto_of_an_auto_function_keeps_its_signature(self):
+        doc = self.open_doc("auto_hover.d")
+        text = self._hover_char(doc, "auto shortened()", 1)
+        self.assertIn("shortened()", text)
