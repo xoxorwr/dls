@@ -192,7 +192,18 @@ T getExpression(T)(T beforeTokens)
 		// its parameters.  Stopping *after* the `!` used to make the chain
 		// start at the argument, which is why a call to a template function
 		// resolved to `int.member` instead of the function's return type.
+		//
+		// Only a `!` that follows the template's *name* is that operator.  The
+		// same token also spells unary logical not, and sweeping `!foo` into
+		// the chain made every hover / go-to-definition inside `if (!foo(x))`
+		// look up a symbol named "!" and come back with nothing - the chain
+		// has to start at `foo`.
 		case tok!"!":
+			if (i == 0 || beforeTokens[i - 1].type != tok!"identifier")
+			{
+				i++;
+				break expressionLoop;
+			}
 			break;
 		case tok!")":
 			open = tok!")";
