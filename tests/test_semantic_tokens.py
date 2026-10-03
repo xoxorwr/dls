@@ -238,3 +238,78 @@ class SemanticTokenTests(DlsTestCase):
             },
         )
         self.assertEqual(result["data"], [])
+
+
+ALIAS_SOURCE = """module alias_app;
+
+float sqrt(float v);
+
+alias sqrtf = sqrt;
+alias MyInt = int;
+
+void main()
+{
+    float a = sqrtf(1);
+    MyInt n;
+}
+"""
+
+
+class AliasSemanticTokenTests(DlsTestCase):
+    """An alias colours as what it names: a function alias is a function.
+
+    ``alias sqrtf = sqrt;`` used to report ``sqrtf`` as ``type`` (every alias
+    mapped there); its declaration and its call site now report ``function``.
+    An alias that names a builtin (``alias MyInt = int;``) still reports
+    ``type`` instead of following the keyword to a property.
+    """
+
+    PROJECT = {"alias_app.d": ALIAS_SOURCE}
+    CLIENT_CAPABILITIES = {
+        "textDocument": {
+            "semanticTokens": {
+                "requests": {"full": True},
+                "tokenTypes": [],
+                "tokenModifiers": [],
+                "formats": ["relative"],
+            }
+        }
+    }
+
+    def _token_at(self, doc, needle):
+        """The decoded token starting where ``needle`` starts."""
+        legend = self.client.capabilities["semanticTokensProvider"]["legend"]
+        data = doc.semantic_tokens()["data"]
+        wanted = doc.position(needle, -len(needle))
+        line = character = 0
+        for i in range(0, len(data), 5):
+            delta_line, delta_start, length, token_type, bits = data[i : i + 5]
+            line += delta_line
+            character = character + delta_start if delta_line == 0 else delta_start
+            if (line, character) == wanted:
+                return {
+                    "type": legend["tokenTypes"][token_type],
+                    "modifiers": {
+                        legend["tokenModifiers"][bit]
+                        for bit in range(len(legend["tokenModifiers"]))
+                        if bits & (1 << bit)
+                    },
+                }
+        self.fail(f"no semantic token starts at {needle!r} {wanted}")
+
+    def test_an_alias_to_a_function_is_a_function(self):
+        doc = self.open_doc("alias_app.d")
+
+        declaration = self._token_at(doc, "sqrtf = sqrt")
+        self.assertEqual(declaration["type"], "function")
+        self.assertIn("declaration", declaration["modifiers"])
+
+        use = self._token_at(doc, "sqrtf(1)")
+        self.assertEqual(use["type"], "function")
+        self.assertNotIn("declaration", use["modifiers"])
+
+    def test_an_alias_to_a_builtin_type_is_still_a_type(self):
+        doc = self.open_doc("alias_app.d")
+
+        self.assertEqual(self._token_at(doc, "MyInt = int")["type"], "type")
+        self.assertEqual(self._token_at(doc, "MyInt n")["type"], "type")

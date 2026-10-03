@@ -540,7 +540,19 @@ private ubyte identifierTokenType(const(Token) token, const(Token)[] parserToken
         || symbol.kind == CompletionKind.variadicTmpParam)
         modifiers |= 1 << DSemanticTokenModifier.readonly;
 
-    return semanticTokenTypeOf(symbol.kind);
+    // An alias is transparent: `alias sqrtf = sqrt;` colours `sqrtf` the way
+    // `sqrt` colours (a function), not as a type.  The modifiers above stay
+    // those of the alias itself (its own declaration site and file).
+    DSymbol* target = symbol;
+    size_t aliasDepth = 0;
+    while (target.kind == CompletionKind.aliasName && target.type !is null && aliasDepth++ < 8)
+        target = target.type;
+    // An alias that names a builtin (`alias MyInt = int;`) still declares a
+    // type: the keyword it points at would otherwise colour as a property.
+    if (target !is symbol && target.kind == CompletionKind.keyword)
+        return DSemanticTokenType.type;
+
+    return semanticTokenTypeOf(target.kind);
 }
 
 /**
@@ -1440,6 +1452,21 @@ string from_kind(CompletionKind kind)
 }
 
 /**
+ * The ` = <initializer>` half of a hover line for a symbol whose value the
+ * first pass flattened into `constantValue`: a manifest constant
+ * (`enum name = 4;`), an enum member (`Red = 3`), or a declaration the value
+ * is otherwise kept for (`immutable string s = "x";`, folded for
+ * `__traits(getMember)`).  Empty for everything else -- including a plain
+ * `int x = 5;`, which was never recorded -- so every caller can concatenate
+ * it unconditionally.
+ */
+private string initializerSuffix(const DSymbol* sym)
+{
+    return sym !is null && sym.constantValue.length > 0
+        ? " = " ~ sym.constantValue : "";
+}
+
+/**
  * Cursor on an `auto` keyword -> the offset of the name it declares, so the
  * lookup resolves the value there; `auto` itself names nothing.  Every other
  * position comes back unchanged.
@@ -1569,7 +1596,7 @@ extern(C) export string[] dcd_hover(const(char)* filename, const(char)* content,
                     {
                         if (child.kind == CompletionKind.enumMember)
                         {
-                            value ~= "    " ~ child.name ~ ",\n"; //", //ct:" ~ child.callTip[] ~ "\n";
+                            value ~= "    " ~ child.name ~ initializerSuffix(child) ~ ",\n";
 
                             //foreach (it; child.opSlice[])
                             //{
@@ -1625,17 +1652,17 @@ extern(C) export string[] dcd_hover(const(char)* filename, const(char)* content,
                         
                         string storagePrefix = parameterStorageClassPrefix(sym);
                         if (typeName.length > 0){
-                            value ~= storagePrefix ~ declaredTypeQualifierWrap(sym, typeName) ~ " " ~ sym.name ~ ";";
+                            value ~= storagePrefix ~ declaredTypeQualifierWrap(sym, typeName) ~ " " ~ sym.name ~ initializerSuffix(sym) ~ ";";
                         }
                         else{
                             value ~= storagePrefix
                                 ~ declaredTypeQualifierWrap(sym, sym.type.formatType())
-                                ~ " " ~ sym.name ~ ";";
+                                ~ " " ~ sym.name ~ initializerSuffix(sym) ~ ";";
 
 
                         }
                     } else {
-                        value ~= "??? " ~ sym.name ~ ";";
+                        value ~= "??? " ~ sym.name ~ initializerSuffix(sym) ~ ";";
                     }
                 }
                 else if (sym.kind == CompletionKind.aliasName)
@@ -1668,9 +1695,9 @@ extern(C) export string[] dcd_hover(const(char)* filename, const(char)* content,
                 else if (sym.kind == CompletionKind.enumMember)
                 {
                     if (sym.type && sym.type.kind == CompletionKind.enumName)
-                        value ~= "enum " ~ sym.type.name ~ "." ~ sym.name;
+                        value ~= "enum " ~ sym.type.name ~ "." ~ sym.name ~ initializerSuffix(sym);
                     else
-                        value ~= "enum member " ~ sym.name;
+                        value ~= "enum member " ~ sym.name ~ initializerSuffix(sym);
                 }
             }
             ret ~= value;

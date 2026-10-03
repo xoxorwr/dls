@@ -394,6 +394,8 @@ private bool unquoteTraitLiteral(string text, out istring memberName)
 
 /// Follows an identifier to the manifest string constant it names
 /// (`enum name = "bar"`, recorded by the first pass), through one alias hop.
+/// The recorded text is the initializer as written, quotes included, so it
+/// has to be unquoted the same way a literal argument is.
 private bool resolveConstantName(istring name, DSymbol* symbol, Scope* moduleScope,
 	out istring memberName)
 {
@@ -402,16 +404,10 @@ private bool resolveConstantName(istring name, DSymbol* symbol, Scope* moduleSco
 	if (target is null)
 		return false;
 	if (target.constantValue.length > 0)
-	{
-		memberName = target.constantValue;
-		return true;
-	}
+		return unquoteTraitLiteral(target.constantValue, memberName);
 	if (target.kind == CompletionKind.aliasName && target.type !is null
 		&& target.type.constantValue.length > 0)
-	{
-		memberName = target.type.constantValue;
-		return true;
-	}
+		return unquoteTraitLiteral(target.type.constantValue, memberName);
 	return false;
 }
 

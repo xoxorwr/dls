@@ -151,6 +151,47 @@ class TypeofGetMemberLiteralTests(DlsTestCase):
         self.assertEqual(find_item(items, "sizeof")["label"], "sizeof")
 
 
+COMPILE_TIME_STRINGS = """module TraitsImmutableNames;
+
+struct Foo(T)
+{
+    alias bar = T;
+}
+
+Foo!int foo;
+
+immutable string a = "bar";
+static immutable string b = "bar";
+
+alias T = typeof(foo);
+alias Ma = __traits(getMember, T, a);
+alias Mb = __traits(getMember, T, b);
+
+Ma va;
+Mb vb;
+
+extern(C) void main()
+{
+    va.
+}
+"""
+
+
+class CompileTimeStringNameTests(DlsTestCase):
+    """A member name through an `immutable`/`static immutable` string still
+    folds: those are compile-time constants, so the first pass records their
+    initializer the same way it does an `enum`'s (only the shape changed --
+    the recorded text now keeps its quotes and is unquoted on the way out).
+    """
+
+    PROJECT = {"app.d": COMPILE_TIME_STRINGS}
+
+    def test_immutable_string_member_name(self):
+        doc = self.open_doc("app.d")
+        items = doc.completion("va.")["items"]
+        self.assertEqual(find_item(items, "sizeof")["label"], "sizeof")
+
+
 class TypeofAloneTests(DlsTestCase):
     PROJECT = {"app.d": TYPEOF_ALONE}
 

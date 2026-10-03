@@ -358,7 +358,9 @@ final class FirstPass : ASTVisitor
 			symbol.parent = currentSymbol;
 			symbol.acSymbol.protection = protection.current;
 			symbol.acSymbol.doc = makeDocumentation(declarator.comment);
-			foldStringInitializer(declarator.initializer, symbol.acSymbol);
+			if (isManifestConstant(dec.storageClasses)
+				|| isStringLiteralInitializer(declarator.initializer))
+				foldConstantInitializer(declarator.initializer, symbol.acSymbol);
 			currentSymbol.addChild(symbol, true);
 			currentScope.addSymbol(symbol.acSymbol, false);
 
@@ -459,7 +461,9 @@ final class FirstPass : ASTVisitor
 				symbolFile, part.identifier.index);
 			symbol.parent = currentSymbol;
 			populateInitializer(symbol, part.initializer);
-			foldStringInitializer(part.initializer, symbol.acSymbol);
+			if (isManifestConstant(dec.autoDeclaration.storageClasses)
+				|| isStringLiteralInitializer(part.initializer))
+				foldConstantInitializer(part.initializer, symbol.acSymbol);
 				symbol.acSymbol.protection = protection.current;
 				symbol.acSymbol.doc = makeDocumentation(dec.comment);
 				currentSymbol.addChild(symbol, true);
@@ -1214,6 +1218,7 @@ private:
 				member.name.index, member.type);
 			scope(exit) popSymbol();
 			currentSymbol.acSymbol.doc = makeDocumentation(member.comment);
+			foldConstantExpression(member.assignExpression, currentSymbol.acSymbol);
 			if (currentSymbol.parent && (currentSymbol.parent.acSymbol.kind == CompletionKind.enumName))
 				currentSymbol.acSymbol.type = currentSymbol.parent.acSymbol;
 		}
@@ -1972,28 +1977,66 @@ istring lastTypeIdentifierName(const TypeIdentifierPart tip)
 }
 
 
-/// Records the value of `= "literal"` on the symbol, so later passes can fold
-/// a manifest constant (`enum name = "bar"`) without re-reading the tree.
-/// Only a single plain-quoted literal is folded; anything else leaves the
-/// symbol's `constantValue` empty.
-void foldStringInitializer(const Initializer init, DSymbol* symbol)
+/// True when `enum` is one of the storage classes, i.e. the declaration is a
+/// manifest constant (`enum name = value;`) rather than an ordinary variable.
+/// `enum uint name = 5;` (a declared type as well) and `enum name = 5;` (the
+/// auto-declaration shape dparse produces) both carry it.
+bool isManifestConstant(const(StorageClass)[] storageClasses)
 {
-	if (init is null || init.nonVoidInitializer is null
-		|| init.nonVoidInitializer.assignExpression is null)
+	foreach (sc; storageClasses)
+		if (sc.token.type == tok!"enum")
+			return true;
+	return false;
+}
+
+/// Records a constant declaration's initializer as source text (`4`,
+/// `(1 << 0)`, `"bar"`) on the symbol's `constantValue`.
+///
+/// This has to happen here: the parser's allocator -- and with it every AST
+/// node -- is gone once the first pass returns, so a symbol that will ever
+/// show or fold its value has to carry the flattened text.  Callers gate it
+/// to a manifest constant (`enum`) or a single string-literal initializer;
+/// an ordinary `int x = 5;` keeps an empty `constantValue`.
+void foldConstantInitializer(const Initializer init, DSymbol* symbol)
+{
+	if (init is null || init.nonVoidInitializer is null)
 		return;
+	auto app = appender!string();
+	formatNode(app, init.nonVoidInitializer);
+	symbol.constantValue = internString(app.data);
+}
+
+/// ditto, for the bare `assignExpression` an enum member carries instead of
+/// an `Initializer` wrapper.
+void foldConstantExpression(const ExpressionNode expr, DSymbol* symbol)
+{
+	if (expr is null)
+		return;
+	auto app = appender!string();
+	formatNode(app, expr);
+	symbol.constantValue = internString(app.data);
+}
+
+/// True when the initializer is a single plain-quoted string literal
+/// (`"a"`, `` `c` ``) -- the shape `__traits(getMember, T, name)` folds by
+/// name.  Such a declaration is recorded whatever its storage class, because
+/// `immutable`/`static immutable` strings are compile-time constants too, and
+/// `__traits(getMember, T, s)` has to keep folding them.
+bool isStringLiteralInitializer(const Initializer init)
+{
+	if (init is null || init.nonVoidInitializer is null)
+		return false;
 	auto expr = init.nonVoidInitializer.assignExpression;
-	if (expr.tokens.length != 1)
-		return;
+	if (expr is null || expr.tokens.length != 1)
+		return false;
 	auto t = expr.tokens[0];
 	if (t.type != tok!"stringLiteral" && t.type != tok!"wstringLiteral"
 		&& t.type != tok!"dstringLiteral")
-		return;
+		return false;
 	if (t.text.length < 2)
-		return;
+		return false;
 	immutable char q = t.text[0];
-	if ((q != '"' && q != '\'' && q != '`') || t.text[$ - 1] != q)
-		return;
-	symbol.constantValue = internString(t.text[1 .. $ - 1]);
+	return (q == '"' || q == '\'' || q == '`') && t.text[$ - 1] == q;
 }
 
 /// Public: also used from `dcd.server.dll` to resolve an import's module

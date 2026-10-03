@@ -550,10 +550,15 @@ struct DSymbol
 	istring typeSymbolName;
 
 	/**
-	 * The string a manifest constant (`enum name = "bar"`) was initialized
-	 * with, unquoted.  Only the single-literal shape is folded; anything else
-	 * leaves this empty.  Used to resolve `__traits(getMember, T, name)` where
-	 * the member name arrives through a constant instead of a literal.
+	 * The initializer's source text for a constant declaration: a manifest
+	 * constant (`enum name = 4;` -> `4`, `enum name = "bar"` -> `"bar"`) or an
+	 * enum member (`Red = 3` -> `3`).  Empty for every other symbol.
+	 *
+	 * The AST does not outlive the first pass, so the text is flattened there
+	 * (there is no AST node left to render later).  Two consumers read it:
+	 * `resolveConstantName` unquotes a string constant to fold
+	 * `__traits(getMember, T, name)`, and hover prints it after the name so
+	 * the tooltip shows the value and not just the type.
 	 */
 	istring constantValue;
 
