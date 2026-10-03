@@ -92,11 +92,12 @@
     "manifest-constant": {
       "patterns": [
         {
-          "match": "\\b(enum)\\s+(?:[A-Za-z_][A-Za-z0-9_.!]*\\s+)?([A-Za-z_][A-Za-z0-9_]*)\\s*(=)",
+          "match": "\\b(enum)\\s+(?:([A-Za-z_][A-Za-z0-9_.!]*)\\s+)?([A-Za-z_][A-Za-z0-9_]*)\\s*(=)",
           "captures": {
             "1": { "name": "keyword.other.d" },
-            "2": { "name": "variable.other.constant.d" },
-            "3": { "name": "keyword.operator.d" }
+            "2": { "name": "storage.type.d" },
+            "3": { "name": "variable.other.constant.d" },
+            "4": { "name": "keyword.operator.d" }
           }
         }
       ]
