@@ -4,16 +4,7 @@
 language](https://dlang.org/), built on a fork of
 [DCD](https://github.com/dlang-community/DCD).
 
-
 > **Work in progress.**
-
-- **Completion**, including template instances, UFCS, `alias this` and `.ENUM`
-- **Hover**, **go to definition**, **document symbols**, **signature help**,
-  **semantic highlighting** (`textDocument/semanticTokens/full`)
-- **Diagnostics** from your own checkers, published on save and on external change
-- **Editor agnostic**: one watched `dls.json` at the workspace root; the server
-  reads nothing from the client
-- A single static binary with the D runtime linked in - no daemon, no sockets
 
 ![Template completion in dls](docs/templates.png)
 
