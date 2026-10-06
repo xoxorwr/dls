@@ -104,3 +104,24 @@ class FindReferencesTests(DlsTestCase):
         # right after the import statement's ';' - no identifier there
         results = self.app.references("import other;")
         self.assertEqual(results, [])
+
+    def test_finds_references_when_declaration_file_has_unsaved_edits(self):
+        # Modify other.d in memory with prepended comments shifting offsets
+        dirty_other = "// extra line 1\n// extra line 2\n" + OTHER
+        self.other.change(dirty_other)
+        results = self.other.references("class Gadget", offset=-1)
+        self.assertEqual(len(results), 3)
+        by_file = sorted(r["uri"].rsplit("/", 1)[-1] for r in results)
+        self.assertEqual(by_file, ["app.d", "app.d", "other.d"])
+        # Restore
+        self.other.change(OTHER)
+
+    def test_include_declaration_false_drops_function_declaration(self):
+        # run() is a function in other.d
+        with_decl = self.other.references("void run", offset=-1, include_declaration=True)
+        without_decl = self.other.references("void run", offset=-1, include_declaration=False)
+        # 1 declaration in other.d + 1 call in app.d (g2.run())
+        self.assertEqual(len(with_decl), 2)
+        self.assertEqual(len(without_decl), 1)
+        self.assertTrue(without_decl[0]["uri"].endswith("app.d"))
+

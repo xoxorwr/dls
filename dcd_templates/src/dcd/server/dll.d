@@ -1220,6 +1220,11 @@ extern(C) export Location[] dcd_definition(const(char)* filename, const(char)* c
     request.sourceCode = cast(ubyte[]) fromStringz(content);
 
     auto im = istring(p);
+    auto liveBytes = cast(ubyte[]) request.sourceCode;
+    if (liveBytes.length > 0 && !cache.sourceUnchanged(im, liveBytes))
+    {
+        cache.cacheModule(p, liveBytes);
+    }
     cache.resolveDeferredTypes(im);
 
     HashSet!istring rg;
@@ -1321,6 +1326,11 @@ extern(C) export DReferenceLocation[] dcd_find_references(const(char)* filename,
         return ret;
 
     auto im = istring(p);
+    auto liveBytes = cast(ubyte[]) request.sourceCode;
+    if (liveBytes.length > 0 && !cache.sourceUnchanged(im, liveBytes))
+    {
+        cache.cacheModule(p, liveBytes);
+    }
     cache.resolveDeferredTypes(im);
 
     HashSet!istring rg;
@@ -1411,7 +1421,7 @@ extern(C) export DReferenceLocation[] dcd_find_references(const(char)* filename,
             if (!targets.canFind(TargetKey(symFile, symbol.location)))
                 continue;
 
-            if (!includeDeclaration && symbol.location == token.index)
+            if (!includeDeclaration && (symbol.location == token.index || symbol.location == token.index + token.text.length))
                 continue;
 
             ret ~= DReferenceLocation(path, token.index, token.text.length);
