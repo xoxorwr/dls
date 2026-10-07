@@ -1,4 +1,4 @@
-"""Context-sensitive aggregate literal ``. (args)`` (the fork's dot syntax)."""
+"""Context-sensitive aggregate literal ``.{...}`` (the fork's dot syntax)."""
 
 from harness import DlsTestCase, labels
 
@@ -21,17 +21,18 @@ void main()
 
 class DotStructLiteralTests(DlsTestCase):
     PROJECT = {
-        "empty.d": with_main("    state.pos = .("),
-        "positional.d": with_main("    state.pos = .(1.0, "),
-        "named.d": with_main("    state.pos = .(x: "),
+        "empty.d": with_main("    state.pos = .{"),
+        "positional.d": with_main("    state.pos = .{1.0, "),
+        "named.d": with_main("    state.pos = .{x: "),
+        "partial.d": with_main("    state.pos = .{x"),
         # A complete statement using the syntax; completion on the next line must
-        # still work, i.e. the parser no longer chokes on `.()`.
+        # still work, i.e. the parser no longer chokes on `.{...}`.
         "complete.d": DECLS
         + """
 void main()
 {
     State state;
-    state.pos = .(1.0, 2.0);
+    state.pos = .{1.0, 2.0};
     state.
 }
 """,
@@ -42,13 +43,16 @@ void main()
         return sorted(labels(doc.completion(needle)["items"]))
 
     def test_assignment_lists_the_expected_fields(self):
-        self.assertEqual(self.fields_after("empty.d", "state.pos = .("), ["x", "y"])
+        self.assertEqual(self.fields_after("empty.d", "state.pos = .{"), ["x", "y"])
 
     def test_positional_argument_still_lists_the_fields(self):
-        self.assertEqual(self.fields_after("positional.d", "state.pos = .(1.0, "), ["x", "y"])
+        self.assertEqual(self.fields_after("positional.d", "state.pos = .{1.0, "), ["x", "y"])
 
     def test_named_argument_still_lists_the_fields(self):
-        self.assertEqual(self.fields_after("named.d", "state.pos = .(x: "), ["x", "y"])
+        self.assertEqual(self.fields_after("named.d", "state.pos = .{x: "), ["x", "y"])
+
+    def test_partial_field_name_is_filtered(self):
+        self.assertEqual(self.fields_after("partial.d", "state.pos = .{x"), ["x"])
 
     def test_parses_and_completes_after_a_complete_literal(self):
         items = self.fields_after("complete.d", "state.")
@@ -67,7 +71,7 @@ struct State { Vec2 pos; }
 void main()
 {
     State state;
-    state.pos = .(1.0, 2.0);
+    state.pos = .{1.0, 2.0};
     state.
 }
 """

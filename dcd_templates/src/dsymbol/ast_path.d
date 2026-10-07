@@ -45,6 +45,24 @@ struct CursorContext
 	size_t argumentIndex;
 	/// Parameter name when the cursor is in a named argument (`callArgument`).
 	string argumentName;
+	/// When the cursor sits in a field of a `.{...}` aggregate literal, the
+	/// construct that gives the literal its type (the literal's own context).
+	CursorContextKind parentKind = CursorContextKind.none;
+	ExpressionNode parentExpected;
+	FunctionCallExpression parentCall;
+	size_t parentArgumentIndex;
+	string parentArgumentName;
+}
+
+/// True when `call` is a context-sensitive aggregate literal `.{...}`.
+bool isAggregateLiteralCall(const FunctionCallExpression call)
+{
+	if (call is null || call.unaryExpression is null)
+		return false;
+	auto primary = call.unaryExpression.primaryExpression;
+	return primary !is null
+		&& primary.dot != tok!""
+		&& primary.identifierOrTemplateInstance is null;
 }
 
 /// Byte offset just past `token`'s last token, or `token.index` when the
@@ -127,6 +145,12 @@ private class CursorContextVisitor : ASTVisitor
 			}
 			record(CursorContextKind.callArgument, null, n, index, argName);
 		}
+		else if (isAggregateLiteralCall(n) && onCursorLine(n))
+		{
+			// `.{...}` literal whose argument list the parser has not
+			// materialized (the cursor is inside it): the cursor is field 0.
+			record(CursorContextKind.callArgument, null, n, 0, null);
+		}
 		super.visit(n);
 	}
 
@@ -166,6 +190,18 @@ private class CursorContextVisitor : ASTVisitor
 				return;
 			if (contains == recordedContains && span >= width)
 				return;
+			// Replacing an already-recorded construct: when both it and the new
+			// one contain the cursor, the new one is nested inside it, so the
+			// old one is the enclosing context (used to give a `.{...}`
+			// literal its type).
+			if (recordedContains && contains)
+			{
+				result.parentKind = result.kind;
+				result.parentExpected = result.expected;
+				result.parentCall = result.call;
+				result.parentArgumentIndex = result.argumentIndex;
+				result.parentArgumentName = result.argumentName;
+			}
 		}
 		recordedContains = contains;
 		width = span;

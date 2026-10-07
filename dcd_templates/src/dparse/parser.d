@@ -470,6 +470,27 @@ class Parser
     }
 
     /**
+     * Parses the brace spelling of the context-sensitive aggregate literal's
+     * argument list, `. { 1, x: 2 }`.
+     *
+     * $(GRAMMAR $(RULEDEF braceArguments):
+     *     $(LITERAL '{') $(RULE namedArgumentList)? $(LITERAL '}')
+     *     ;)
+     */
+    Arguments parseBraceArguments()
+    {
+        mixin(traceEnterAndExit!(__FUNCTION__));
+        auto startIndex = index;
+        auto node = allocator.make!Arguments;
+        mixin(tokenCheck!"{");
+        if (!currentIs(tok!"}"))
+            mixin (parseNodeQ!(`node.namedArgumentList`, `NamedArgumentList`));
+        mixin(tokenCheck!"}");
+        node.tokens = tokens[startIndex .. index];
+        return node;
+    }
+
+    /**
      * Parses an ArrayInitializer.
      *
      * $(GRAMMAR $(RULEDEF arrayInitializer):
@@ -3611,7 +3632,7 @@ class Parser
      *     | $(RULE type) $(RULE arguments)
      *     ;)
      */
-    FunctionCallExpression parseFunctionCallExpression(UnaryExpression unary = null)
+    FunctionCallExpression parseFunctionCallExpression(UnaryExpression unary = null, bool brace = false)
     {
         mixin(traceEnterAndExit!(__FUNCTION__));
         auto startIndex = index;
@@ -3639,7 +3660,12 @@ class Parser
             if (currentIs(tok!"!"))
                 mixin(parseNodeQ!(`node.templateArguments`, `TemplateArguments`));
             if (unary !is null)
-                mixin(parseNodeQ!(`node.arguments`, `Arguments`));
+            {
+                if (brace)
+                    node.arguments = parseBraceArguments();
+                else
+                    mixin(parseNodeQ!(`node.arguments`, `Arguments`));
+            }
         }
         node.tokens = tokens[startIndex .. index];
         return node;
@@ -5967,8 +5993,13 @@ class Parser
         {
         case tok!".":
             node.dot = advance();
-            if (currentIs(tok!"("))
-                break; // `. (args)`: context-sensitive aggregate literal
+            if (currentIs(tok!"{"))
+                break; // `.{...}`: context-sensitive aggregate literal
+            // A lone `.` (the member name being typed in `.member`) is not a
+            // complete expression; tolerate it so one incomplete shorthand does
+            // not truncate the whole file's tree.
+            if (!currentIs(tok!"identifier") && !currentIs(tok!"new"))
+                break;
             goto case;
         case tok!"identifier":
             if (peekIs(tok!"=>"))
@@ -8136,6 +8167,21 @@ class Parser
                 node.tokens = tokens[startIndex .. index]; // for parseFunctionCallExpression to inherit
             mixin (nullCheck!`newUnary.functionCallExpression = parseFunctionCallExpression(node)`);
             node = newUnary;
+            break;
+        case tok!"{":
+            // `.{...}`: brace spelling of the context-sensitive aggregate
+            // literal, only directly after the leading-dot marker.
+            if (node.primaryExpression is null
+                || node.primaryExpression.dot == tok!""
+                || node.primaryExpression.identifierOrTemplateInstance !is null)
+                break loop;
+            {
+                auto newUnary = allocator.make!UnaryExpression();
+                if (node !is null)
+                    node.tokens = tokens[startIndex .. index];
+                mixin (nullCheck!`newUnary.functionCallExpression = parseFunctionCallExpression(node, true)`);
+                node = newUnary;
+            }
             break;
         case tok!"++":
         case tok!"--":

@@ -1782,6 +1782,8 @@ extern(C) SignatureHelpResponse dcd_get_signature(const(char)* filename, const(c
 
     size_t dummyParenIndex; 
     CalltipHint calltipHint = getCalltipHint(beforeTokensRelease, dummyParenIndex);
+    if (calltipHint == CalltipHint.none)
+        calltipHint = getSignatureCalltipHint(beforeTokensRelease);
     if (calltipHint == CalltipHint.none) return response;
 
     // 1. Move the opening parenthesis search BEFORE getting the expression

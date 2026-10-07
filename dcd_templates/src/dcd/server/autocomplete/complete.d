@@ -38,6 +38,7 @@ import dparse.ast : ExpressionNode, FunctionCallExpression,
 import dparse.lexer;
 import dparse.rollback_allocator;
 
+import dsymbol.ast_path : CursorContextKind;
 import dsymbol.builtin.names;
 import dsymbol.builtin.symbols;
 import dsymbol.conversion;
@@ -285,10 +286,10 @@ auto getStructInitializerTokenChain(T)(T tokens) {
 
 /**
  * The expression before the `=` that gives the type of the context-sensitive
- * aggregate literal `. (args)` the cursor sits in, or an empty slice when the
+ * aggregate literal `.{...}` the cursor sits in, or an empty slice when the
  * cursor is not inside one.
  *
- * `Foo foo = .( <here>` and `foo.bar = .( 1, <here>` both return the tokens of
+ * `Foo foo = .{ <here>` and `foo.bar = .{ 1, <here>` both return the tokens of
  * the left hand side (`foo` / `foo.bar`), which is what
  * `CompletionType.structMembers` needs to list the fields the literal should
  * be built from.
@@ -298,37 +299,37 @@ auto getDotAggregateLiteralChain(T)(T tokens)
     if (tokens.length == 0)
         return (const(Token)[]).init;
 
-    // The innermost unclosed `(` ...
+    // The innermost unclosed `{` ...
     size_t depth = 0;
-    size_t parenIndex = size_t.max;
+    size_t braceIndex = size_t.max;
     for (size_t i = tokens.length; i-- > 0;)
     {
         switch (tokens[i].type)
         {
-        case tok!")":
+        case tok!"}":
             depth++;
             break;
-        case tok!"(":
+        case tok!"{":
             if (depth == 0)
-                parenIndex = i;
+                braceIndex = i;
             else
                 depth--;
             break;
         default:
             break;
         }
-        if (parenIndex != size_t.max)
+        if (braceIndex != size_t.max)
             break;
     }
 
-    // ... that is the leading-dot aggregate literal `.(` ...
-    if (parenIndex == size_t.max || parenIndex == 0
-        || tokens[parenIndex - 1].type != tok!".")
+    // ... that is the leading-dot aggregate literal `.{` ...
+    if (braceIndex == size_t.max || braceIndex == 0
+        || tokens[braceIndex - 1].type != tok!".")
         return (const(Token)[]).init;
 
     // ... then the left hand side of the `=` providing its type.
     size_t nested = 0;
-    for (size_t i = parenIndex - 1; i-- > 0;)
+    for (size_t i = braceIndex - 1; i-- > 0;)
     {
         switch (tokens[i].type)
         {
@@ -351,10 +352,12 @@ auto getDotAggregateLiteralChain(T)(T tokens)
         case tok!"=":
             if (nested == 0)
             {
-                auto expr = getExpression(tokens[0 .. i]);
-                if (expr.length > 0)
-                    return expr.release();
-                return (const(Token)[]).init;
+                // `getExpression` returns whatever `tokens` is (a slice or a
+                // range); normalize to a plain slice.
+                const(Token)[] result;
+                foreach (t; getExpression(tokens[0 .. i]))
+                    result ~= t;
+                return result;
             }
             break;
         default:
@@ -414,6 +417,25 @@ AutocompleteResponse dotCompletion(T)(T beforeTokens, const(Token)[] tokenArray,
 		significantTokenType = partial.length > 0 ? tok!"identifier" : tok!"";
 		beforeTokens = beforeTokens[0 .. $ - 1];
 
+		// `.{partial`: completing a field name inside the context-sensitive
+		// aggregate literal.  Take precedence over the enum handling below.
+		if (partial.length > 0)
+		{
+			RollbackAllocator rba;
+			ScopeSymbolPair pair = generateAutocompleteTrees(tokenArray, &rba, cursorPosition, moduleCache);
+			scope(exit) pair.destroy();
+			if (addAggregateLiteralFields(response, pair.syntaxTree, pair.scope_, cursorPosition, partial))
+				return response;
+
+			auto dotChain = getDotAggregateLiteralChain(beforeTokens);
+			if (dotChain.length > 0)
+			{
+				response.setCompletions(moduleCache, pair.scope_, dotChain, cursorPosition,
+					CompletionType.structMembers, CalltipHint.none, partial);
+				return response;
+			}
+		}
+
 		// Dot-shorthand detection: if after stripping the partial identifier,
 		// beforeTokens ends with [ ..., context_tok, . ] where context_tok is
 		// =, ==, !=, (, or ,  — then we're in a dot-shorthand enum context.
@@ -451,7 +473,14 @@ AutocompleteResponse dotCompletion(T)(T beforeTokens, const(Token)[] tokenArray,
 			return response;
 		}
 		else
+		{
+			// `.{...}` as a call argument: list the fields of the expected type.
+			RollbackAllocator rba;
+			ScopeSymbolPair pair = generateAutocompleteTrees(tokenArray, &rba, cursorPosition, moduleCache);
+			scope(exit) pair.destroy();
+			addAggregateLiteralFields(response, pair.syntaxTree, pair.scope_, cursorPosition, partial);
 			return response;
+		}
 	}
 
 	// Keyword completion, in both positions: the bare prefix (`__tra` ->
@@ -501,14 +530,16 @@ AutocompleteResponse dotCompletion(T)(T beforeTokens, const(Token)[] tokenArray,
 		response.setCompletions(moduleCache, pair.scope_, expression, cursorPosition, type, CalltipHint.none, partial);
 		break;
 	// Dot-shorthand enum completion: when a dot is preceded by `=`, `==`, `!=`,
-	// `(`, or `,`, try to infer the expected enum type from context and return
-	// its members. Falls through to module scope operator if not an enum context.
+	// `(`, `,`, `:`, or `{`, try to infer the expected enum type from context
+	// and return its members. Falls through to module scope operator if not an
+	// enum context.
 	case tok!"=":
 	case tok!"==":
 	case tok!"!=":
 	case tok!"(":
 	case tok!",":
 	case tok!":":
+	case tok!"{":
 		{
 			RollbackAllocator rba;
 			ScopeSymbolPair pair = generateAutocompleteTrees(tokenArray, &rba, cursorPosition, moduleCache);
@@ -538,7 +569,6 @@ AutocompleteResponse dotCompletion(T)(T beforeTokens, const(Token)[] tokenArray,
 		goto moduleScopeOperator;
 	//  these tokens before a "." mean "Module Scope Operator"
 	case tok!"[":
-	case tok!"{":
 	case tok!";":
 	case tok!"}":
 	moduleScopeOperator:
@@ -580,7 +610,7 @@ AutocompleteResponse dotCompletion(T)(T beforeTokens, const(Token)[] tokenArray,
 const(DSymbol)* tryResolveExpectedEnumType(T)(const Module syntaxTree, Scope* completionScope,
 	size_t cursorPosition, T beforeTokens)
 {
-	import dsymbol.ast_path : CursorContextKind, findCursorContext;
+	import dsymbol.ast_path : CursorContextKind, findCursorContext, isAggregateLiteralCall;
 
 	auto context = findCursorContext(syntaxTree, cursorPosition);
 	final switch (context.kind)
@@ -600,6 +630,22 @@ const(DSymbol)* tryResolveExpectedEnumType(T)(const Module syntaxTree, Scope* co
 	case CursorContextKind.callArgument:
 		{
 			warning("dot-shorthand: call argument from the tree");
+			// The cursor is a field of a `.{...}` aggregate literal: the
+			// literal's type comes from *its* context (the parent), then the
+			// field at the cursor gives the expected type.
+			if (isAggregateLiteralCall(context.call))
+			{
+				auto literalType = typeFromContext(context.parentKind, context.parentExpected,
+					context.parentCall, context.parentArgumentIndex, context.parentArgumentName,
+					completionScope, cursorPosition);
+				if (literalType !is null)
+				{
+					auto symbol = enumFromCallableSymbol(literalType, context.argumentIndex, context.argumentName);
+					if (symbol !is null)
+						return symbol;
+				}
+				return enumFromTokenWindow(beforeTokens, completionScope, cursorPosition);
+			}
 			auto symbol = enumFromCallArgument(context.call, context.argumentIndex,
 				completionScope, cursorPosition, context.argumentName);
 			if (symbol !is null)
@@ -607,6 +653,76 @@ const(DSymbol)* tryResolveExpectedEnumType(T)(const Module syntaxTree, Scope* co
 			return enumFromTokenWindow(beforeTokens, completionScope, cursorPosition);
 		}
 	}
+}
+
+/**
+ * Resolves the type a construct expects.  Same shape as
+ * `tryResolveExpectedEnumType`, but for a `.{...}` literal's parent context and
+ * without requiring the result to be an enum.
+ */
+private DSymbol* typeFromContext(CursorContextKind kind, ExpressionNode expected,
+	FunctionCallExpression call, size_t argumentIndex, string argumentName,
+	Scope* completionScope, size_t cursorPosition)
+{
+	import dsymbol.ast_path : CursorContextKind;
+	import dsymbol.conversion.second : typeSwap;
+
+	switch (kind)
+	{
+	case CursorContextKind.assignmentRhs:
+	case CursorContextKind.comparisonRhs:
+		if (expected is null)
+			return null;
+		DSymbol* symbol = resolveExpressionSymbol(expected, completionScope, cursorPosition);
+		if (symbol is null)
+			return null;
+		typeSwap(symbol);
+		return symbol;
+	case CursorContextKind.callArgument:
+		if (call is null)
+			return null;
+		auto funcSym = resolveExpressionSymbol(call.unaryExpression, completionScope, cursorPosition);
+		return targetFromCallableSymbol(funcSym, argumentIndex, argumentName);
+	default:
+		return null;
+	}
+}
+
+/**
+ * When the cursor is inside a `.{...}` aggregate literal, lists the fields of
+ * the type the literal is expected to have (the literal's parent context).
+ * Returns whether it produced completions.
+ */
+private bool addAggregateLiteralFields(ref AutocompleteResponse response,
+	const Module syntaxTree, Scope* completionScope, size_t cursorPosition, string partial)
+{
+	import dsymbol.ast_path : CursorContextKind, findCursorContext, isAggregateLiteralCall;
+
+	auto context = findCursorContext(syntaxTree, cursorPosition);
+	if (context.kind != CursorContextKind.callArgument || !isAggregateLiteralCall(context.call))
+		return false;
+
+	auto literalType = typeFromContext(context.parentKind, context.parentExpected,
+		context.parentCall, context.parentArgumentIndex, context.parentArgumentName,
+		completionScope, cursorPosition);
+	if (literalType is null)
+		return false;
+
+	foreach (field; literalType.opSlice())
+	{
+		if (field.name is null || field.name.length == 0)
+			continue;
+		if (field.kind != CompletionKind.memberVariableName
+			&& field.kind != CompletionKind.variableName)
+			continue;
+		if (partial.length > 0 && !field.name.data.startsWith(partial))
+			continue;
+		if (field.name[0] == '*')
+			continue;
+		response.completions ~= makeSymbolCompletionInfo(field, field.kind);
+	}
+	response.completionType = CompletionType.structMembers;
+	return true;
 }
 
 /**
@@ -669,10 +785,12 @@ private const(DSymbol)* enumFromTokenChain(T)(T lhsTokens, Scope* completionScop
 }
 
 /**
- * Resolves a callable symbol or struct to the expected enum type of the target
- * parameter or field.
+ * Resolves a callable symbol or struct to the type of the target parameter or
+ * field.  Works for functions and constructors (parameter list) as well as
+ * struct/union literals (field list).  Used both for enum inference and for
+ * giving a `.{...}` literal its type.
  */
-private const(DSymbol)* enumFromCallableSymbol(DSymbol* funcSym,
+private DSymbol* targetFromCallableSymbol(DSymbol* funcSym,
 	size_t argumentIndex, string argumentName = null)
 {
 	import dsymbol.conversion.second : typeSwap;
@@ -704,8 +822,7 @@ private const(DSymbol)* enumFromCallableSymbol(DSymbol* funcSym,
 						{
 							DSymbol* paramSym = param;
 							typeSwap(paramSym);
-							if (paramSym !is null && paramSym.kind == CompletionKind.enumName)
-								return paramSym;
+							return paramSym;
 						}
 					}
 				}
@@ -732,9 +849,7 @@ private const(DSymbol)* enumFromCallableSymbol(DSymbol* funcSym,
 					{
 						DSymbol* fieldSym = field;
 						typeSwap(fieldSym);
-						if (fieldSym !is null && fieldSym.kind == CompletionKind.enumName)
-							return fieldSym;
-						return null;
+						return fieldSym;
 					}
 				}
 				return null;
@@ -745,8 +860,7 @@ private const(DSymbol)* enumFromCallableSymbol(DSymbol* funcSym,
 				{
 					DSymbol* fieldSym = fields[argumentIndex];
 					typeSwap(fieldSym);
-					if (fieldSym !is null && fieldSym.kind == CompletionKind.enumName)
-						return fieldSym;
+					return fieldSym;
 				}
 				return null;
 			}
@@ -763,9 +877,7 @@ private const(DSymbol)* enumFromCallableSymbol(DSymbol* funcSym,
 			{
 				DSymbol* paramSym = param;
 				typeSwap(paramSym);
-				if (paramSym !is null && paramSym.kind == CompletionKind.enumName)
-					return paramSym;
-				return null;
+				return paramSym;
 			}
 		}
 		return null;
@@ -776,9 +888,18 @@ private const(DSymbol)* enumFromCallableSymbol(DSymbol* funcSym,
 
 	DSymbol* paramSym = funcSym.functionParameters[argumentIndex];
 	typeSwap(paramSym);
-	if (paramSym !is null && paramSym.kind == CompletionKind.enumName)
-		return paramSym;
-	return null;
+	return paramSym;
+}
+
+/**
+ * Resolves a callable symbol or struct to the expected enum type of the target
+ * parameter or field (see `targetFromCallableSymbol`).
+ */
+private const(DSymbol)* enumFromCallableSymbol(DSymbol* funcSym,
+	size_t argumentIndex, string argumentName = null)
+{
+	auto target = targetFromCallableSymbol(funcSym, argumentIndex, argumentName);
+	return (target !is null && target.kind == CompletionKind.enumName) ? target : null;
 }
 
 /**
@@ -1138,21 +1259,18 @@ CalltipHint getCalltipHint(T)(T beforeTokens, out size_t parenIndex)
 		size_t tmp = beforeTokens.goBackToOpenParen;
 		if(tmp == size_t.max){
 			// The comma is not inside a call's argument list but directly in
-			// a struct initializer (`Foo foo = { 1, <here>`), where it is the
+			// a struct initializer (`Foo foo = { 1, <here>`) or a leading-dot
+			// aggregate literal (`Foo foo = .{ 1, <here>`), where it is the
 			// separator between two elements and the cursor is waiting for
 			// the next field name.  Leave the hint at `none` so `complete`
 			// hands the request to `dotCompletion`, whose struct-members path
 			// knows what to do with it.
-			if (isStructInitializerElement(beforeTokens))
+			if (isStructInitializerElement(beforeTokens)
+				|| getDotAggregateLiteralChain(beforeTokens).length > 0)
 				return CalltipHint.none;
 			return CalltipHint.regularArguments;
 		}
 		parenIndex = tmp;
-		// `. (args)`: the context-sensitive aggregate literal, whose fields
-		// `dotCompletion` lists.  Leave the hint at none so `complete` hands
-		// the request over to it.
-		if (parenIndex >= 2 && beforeTokens[parenIndex - 2] == tok!".")
-			return CalltipHint.none;
 		// check if we are actually a "!("
 		if (beforeTokens[0 .. parenIndex].isTemplateBangParen)
 		{
@@ -1176,14 +1294,54 @@ CalltipHint getCalltipHint(T)(T beforeTokens, out size_t parenIndex)
 	}
 	else if (beforeTokens.isOpenParen || beforeTokens.isOpenSquareBracket)
 	{
-		// `. (`: the context-sensitive aggregate literal; `dotCompletion`
-		// lists the expected fields, so do not treat it as a call.
-		if (beforeTokens.length >= 2 && beforeTokens[$ - 2] == tok!".")
-			return CalltipHint.none;
 		// open square bracket for literals: `foo([`
 		return CalltipHint.regularArguments;
 	}
 
+	return CalltipHint.none;
+}
+
+/**
+ * Signature-help variant of `getCalltipHint`: reports a hint anywhere inside an
+ * unmatched argument list, not just right after the opener or a comma.
+ *
+ * Completion keeps the stricter `getCalltipHint` -- turning every identifier
+ * typed inside an argument into calltips would break identifier completion --
+ * but signature help is expected to stay visible for the whole argument list.
+ */
+CalltipHint getSignatureCalltipHint(T)(T beforeTokens)
+{
+	if (beforeTokens.length == 0)
+		return CalltipHint.none;
+
+	size_t depth = 0;
+	for (size_t i = beforeTokens.length; i-- > 0;)
+	{
+		switch (beforeTokens[i].type)
+		{
+		case tok!")":
+		case tok!"]":
+			depth++;
+			break;
+		case tok!"(":
+			if (depth == 0)
+			{
+				if (i >= 2 && beforeTokens[i - 1].type == tok!"!"
+					&& beforeTokens[i - 2].type == tok!"identifier")
+					return CalltipHint.templateArguments;
+				return CalltipHint.regularArguments;
+			}
+			depth--;
+			break;
+		case tok!"[":
+			if (depth == 0)
+				return CalltipHint.indexOperator;
+			depth--;
+			break;
+		default:
+			break;
+		}
+	}
 	return CalltipHint.none;
 }
 
