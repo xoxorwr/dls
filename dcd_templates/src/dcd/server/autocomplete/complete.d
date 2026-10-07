@@ -284,6 +284,87 @@ auto getStructInitializerTokenChain(T)(T tokens) {
 }
 
 /**
+ * The expression before the `=` that gives the type of the context-sensitive
+ * aggregate literal `. (args)` the cursor sits in, or an empty slice when the
+ * cursor is not inside one.
+ *
+ * `Foo foo = .( <here>` and `foo.bar = .( 1, <here>` both return the tokens of
+ * the left hand side (`foo` / `foo.bar`), which is what
+ * `CompletionType.structMembers` needs to list the fields the literal should
+ * be built from.
+ */
+auto getDotAggregateLiteralChain(T)(T tokens)
+{
+    if (tokens.length == 0)
+        return (const(Token)[]).init;
+
+    // The innermost unclosed `(` ...
+    size_t depth = 0;
+    size_t parenIndex = size_t.max;
+    for (size_t i = tokens.length; i-- > 0;)
+    {
+        switch (tokens[i].type)
+        {
+        case tok!")":
+            depth++;
+            break;
+        case tok!"(":
+            if (depth == 0)
+                parenIndex = i;
+            else
+                depth--;
+            break;
+        default:
+            break;
+        }
+        if (parenIndex != size_t.max)
+            break;
+    }
+
+    // ... that is the leading-dot aggregate literal `.(` ...
+    if (parenIndex == size_t.max || parenIndex == 0
+        || tokens[parenIndex - 1].type != tok!".")
+        return (const(Token)[]).init;
+
+    // ... then the left hand side of the `=` providing its type.
+    size_t nested = 0;
+    for (size_t i = parenIndex - 1; i-- > 0;)
+    {
+        switch (tokens[i].type)
+        {
+        case tok!")":
+        case tok!"]":
+        case tok!"}":
+            nested++;
+            break;
+        case tok!"(":
+        case tok!"[":
+        case tok!"{":
+            if (nested == 0)
+                return (const(Token)[]).init;
+            nested--;
+            break;
+        case tok!";":
+            if (nested == 0)
+                return (const(Token)[]).init;
+            break;
+        case tok!"=":
+            if (nested == 0)
+            {
+                auto expr = getExpression(tokens[0 .. i]);
+                if (expr.length > 0)
+                    return expr.release();
+                return (const(Token)[]).init;
+            }
+            break;
+        default:
+            break;
+        }
+    }
+    return (const(Token)[]).init;
+}
+
+/**
  * Handles dot completion for identifiers and types.
  * Params:
  *     beforeTokens = the tokens before the cursor
@@ -356,6 +437,18 @@ AutocompleteResponse dotCompletion(T)(T beforeTokens, const(Token)[] tokenArray,
 		if (structChain.length > 0)
 		{
 			significantTokenType = structChain[$ - 1].type;
+		}
+		else if ((structChain = getDotAggregateLiteralChain(beforeTokens)).length > 0)
+		{
+			// `. (args)`: list the fields of the type the surrounding context
+			// expects for the literal, the same way a designated initializer
+			// (`Foo foo = { <here>`) does.
+			RollbackAllocator rba;
+			ScopeSymbolPair pair = generateAutocompleteTrees(tokenArray, &rba, cursorPosition, moduleCache);
+			scope(exit) pair.destroy();
+			response.setCompletions(moduleCache, pair.scope_, structChain, cursorPosition,
+				CompletionType.structMembers, CalltipHint.none, partial);
+			return response;
 		}
 		else
 			return response;
@@ -1055,6 +1148,11 @@ CalltipHint getCalltipHint(T)(T beforeTokens, out size_t parenIndex)
 			return CalltipHint.regularArguments;
 		}
 		parenIndex = tmp;
+		// `. (args)`: the context-sensitive aggregate literal, whose fields
+		// `dotCompletion` lists.  Leave the hint at none so `complete` hands
+		// the request over to it.
+		if (parenIndex >= 2 && beforeTokens[parenIndex - 2] == tok!".")
+			return CalltipHint.none;
 		// check if we are actually a "!("
 		if (beforeTokens[0 .. parenIndex].isTemplateBangParen)
 		{
@@ -1078,6 +1176,10 @@ CalltipHint getCalltipHint(T)(T beforeTokens, out size_t parenIndex)
 	}
 	else if (beforeTokens.isOpenParen || beforeTokens.isOpenSquareBracket)
 	{
+		// `. (`: the context-sensitive aggregate literal; `dotCompletion`
+		// lists the expected fields, so do not treat it as a call.
+		if (beforeTokens.length >= 2 && beforeTokens[$ - 2] == tok!".")
+			return CalltipHint.none;
 		// open square bracket for literals: `foo([`
 		return CalltipHint.regularArguments;
 	}

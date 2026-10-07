@@ -5967,6 +5967,8 @@ class Parser
         {
         case tok!".":
             node.dot = advance();
+            if (currentIs(tok!"("))
+                break; // `. (args)`: context-sensitive aggregate literal
             goto case;
         case tok!"identifier":
             if (peekIs(tok!"=>"))
