@@ -342,7 +342,7 @@ AutocompleteResponse dotCompletion(T)(T beforeTokens, const(Token)[] tokenArray,
 			auto preDoTok = beforeTokens[$ - 2].type;
 			if (preDoTok == tok!"=" || preDoTok == tok!"=="
 				|| preDoTok == tok!"!=" || preDoTok == tok!"("
-				|| preDoTok == tok!",")
+				|| preDoTok == tok!"," || preDoTok == tok!":")
 			{
 				significantTokenType = preDoTok;
 			}
@@ -415,6 +415,7 @@ AutocompleteResponse dotCompletion(T)(T beforeTokens, const(Token)[] tokenArray,
 	case tok!"!=":
 	case tok!"(":
 	case tok!",":
+	case tok!":":
 		{
 			RollbackAllocator rba;
 			ScopeSymbolPair pair = generateAutocompleteTrees(tokenArray, &rba, cursorPosition, moduleCache);
@@ -443,7 +444,6 @@ AutocompleteResponse dotCompletion(T)(T beforeTokens, const(Token)[] tokenArray,
 		// Fall through to module scope operator if not an enum context
 		goto moduleScopeOperator;
 	//  these tokens before a "." mean "Module Scope Operator"
-	case tok!":":
 	case tok!"[":
 	case tok!"{":
 	case tok!";":
@@ -508,7 +508,7 @@ const(DSymbol)* tryResolveExpectedEnumType(T)(const Module syntaxTree, Scope* co
 		{
 			warning("dot-shorthand: call argument from the tree");
 			auto symbol = enumFromCallArgument(context.call, context.argumentIndex,
-				completionScope, cursorPosition);
+				completionScope, cursorPosition, context.argumentName);
 			if (symbol !is null)
 				return symbol;
 			return enumFromTokenWindow(beforeTokens, completionScope, cursorPosition);
@@ -576,18 +576,16 @@ private const(DSymbol)* enumFromTokenChain(T)(T lhsTokens, Scope* completionScop
 }
 
 /**
- * Infers the enum type of the parameter the cursor is in, from the call node in
- * the request's tree.
+ * Resolves a callable symbol or struct to the expected enum type of the target
+ * parameter or field.
  */
-private const(DSymbol)* enumFromCallArgument(const FunctionCallExpression call,
-	size_t argumentIndex, Scope* completionScope, size_t cursorPosition)
+private const(DSymbol)* enumFromCallableSymbol(DSymbol* funcSym,
+	size_t argumentIndex, string argumentName = null)
 {
 	import dsymbol.conversion.second : typeSwap;
+	import std.algorithm : filter, sort;
+	import std.array : array;
 
-	if (call is null)
-		return null;
-
-	DSymbol* funcSym = resolveExpressionSymbol(call.unaryExpression, completionScope, cursorPosition);
 	if (funcSym is null)
 		return null;
 
@@ -595,15 +593,89 @@ private const(DSymbol)* enumFromCallArgument(const FunctionCallExpression call,
 	if (funcSym.kind == CompletionKind.aliasName && funcSym.type !is null)
 		funcSym = funcSym.type;
 
-	// For struct/class constructors, find the constructor
+	// For struct/class constructors or struct literals
 	if (funcSym.kind == CompletionKind.structName
 		|| funcSym.kind == CompletionKind.className
 		|| funcSym.kind == CompletionKind.unionName)
 	{
 		auto ctors = funcSym.getPartsByName(CONSTRUCTOR_SYMBOL_NAME);
-		if (ctors.length == 0)
+		if (ctors.length > 0 && !ctors[0].generated && ctors[0].functionParameters.length > 0)
+		{
+			if (argumentName.length > 0)
+			{
+				foreach (ctor; ctors)
+				{
+					foreach (param; ctor.functionParameters)
+					{
+						if (param !is null && param.name == argumentName)
+						{
+							DSymbol* paramSym = param;
+							typeSwap(paramSym);
+							if (paramSym !is null && paramSym.kind == CompletionKind.enumName)
+								return paramSym;
+						}
+					}
+				}
+				return null;
+			}
+			funcSym = ctors[0];
+		}
+		else if (funcSym.kind == CompletionKind.structName
+			|| funcSym.kind == CompletionKind.unionName)
+		{
+			// Struct without constructor: resolve to struct field
+			auto fields = funcSym.opSlice()
+				.filter!(a => a.kind == CompletionKind.memberVariableName
+					|| a.kind == CompletionKind.variableName)
+				.map!(a => cast(DSymbol*) a)
+				.array();
+			fields.sort!((a, b) => a.location < b.location);
+
+			if (argumentName.length > 0)
+			{
+				foreach (field; fields)
+				{
+					if (field.name == argumentName)
+					{
+						DSymbol* fieldSym = field;
+						typeSwap(fieldSym);
+						if (fieldSym !is null && fieldSym.kind == CompletionKind.enumName)
+							return fieldSym;
+						return null;
+					}
+				}
+				return null;
+			}
+			else
+			{
+				if (argumentIndex < fields.length)
+				{
+					DSymbol* fieldSym = fields[argumentIndex];
+					typeSwap(fieldSym);
+					if (fieldSym !is null && fieldSym.kind == CompletionKind.enumName)
+						return fieldSym;
+				}
+				return null;
+			}
+		}
+		else
 			return null;
-		funcSym = ctors[0];
+	}
+
+	if (argumentName.length > 0)
+	{
+		foreach (param; funcSym.functionParameters)
+		{
+			if (param !is null && param.name == argumentName)
+			{
+				DSymbol* paramSym = param;
+				typeSwap(paramSym);
+				if (paramSym !is null && paramSym.kind == CompletionKind.enumName)
+					return paramSym;
+				return null;
+			}
+		}
+		return null;
 	}
 
 	if (funcSym.functionParameters.length == 0 || argumentIndex >= funcSym.functionParameters.length)
@@ -614,6 +686,21 @@ private const(DSymbol)* enumFromCallArgument(const FunctionCallExpression call,
 	if (paramSym !is null && paramSym.kind == CompletionKind.enumName)
 		return paramSym;
 	return null;
+}
+
+/**
+ * Infers the enum type of the parameter the cursor is in, from the call node in
+ * the request's tree.
+ */
+private const(DSymbol)* enumFromCallArgument(const FunctionCallExpression call,
+	size_t argumentIndex, Scope* completionScope, size_t cursorPosition,
+	string argumentName = null)
+{
+	if (call is null)
+		return null;
+
+	DSymbol* funcSym = resolveExpressionSymbol(call.unaryExpression, completionScope, cursorPosition);
+	return enumFromCallableSymbol(funcSym, argumentIndex, argumentName);
 }
 
 /**
@@ -636,7 +723,7 @@ private const(DSymbol)* enumFromTokenWindow(T)(T beforeTokens, Scope* completion
 		return null;
 
 	auto tokensBeforeDot = beforeTokens[0 .. $ - 1];
-	auto contextTok = tokensBeforeDot[$ - 1].type;
+	IdType contextTok = tokensBeforeDot[$ - 1].type;
 
 	// Assignment context -- `expr = .`
 	if (contextTok == tok!"=")
@@ -650,6 +737,20 @@ private const(DSymbol)* enumFromTokenWindow(T)(T beforeTokens, Scope* completion
 	{
 		auto lhsTokens = tokensBeforeDot[0 .. $ - 1];
 		return enumFromTokenChain(lhsTokens, completionScope, cursorPosition);
+	}
+
+	string argumentName = null;
+	if (contextTok == tok!":")
+	{
+		if (tokensBeforeDot.length >= 2 && tokensBeforeDot[$ - 2].type == tok!"identifier")
+		{
+			argumentName = tokensBeforeDot[$ - 2].text;
+			tokensBeforeDot = tokensBeforeDot[0 .. $ - 2];
+			if (tokensBeforeDot.length > 0)
+				contextTok = tokensBeforeDot[$ - 1].type;
+		}
+		else
+			return null;
 	}
 
 	if (contextTok != tok!"(" && contextTok != tok!",")
@@ -713,32 +814,7 @@ private const(DSymbol)* enumFromTokenWindow(T)(T beforeTokens, Scope* completion
 		return null;
 
 	DSymbol* funcSym = symbols[0];
-
-	// Follow aliases
-	if (funcSym.kind == CompletionKind.aliasName && funcSym.type !is null)
-		funcSym = funcSym.type;
-
-	// For struct/class constructors, find the constructor
-	if (funcSym.kind == CompletionKind.structName
-		|| funcSym.kind == CompletionKind.className
-		|| funcSym.kind == CompletionKind.unionName)
-	{
-		auto ctors = funcSym.getPartsByName(CONSTRUCTOR_SYMBOL_NAME);
-		if (ctors.length == 0)
-			return null;
-		funcSym = ctors[0];
-	}
-
-	if (funcSym.functionParameters.length == 0)
-		return null;
-	if (paramIndex >= funcSym.functionParameters.length)
-		return null;
-
-	DSymbol* paramSym = funcSym.functionParameters[paramIndex];
-	typeSwap(paramSym);
-	if (paramSym !is null && paramSym.kind == CompletionKind.enumName)
-		return paramSym;
-	return null;
+	return enumFromCallableSymbol(funcSym, paramIndex, argumentName);
 }
 
 deprecated("Use `calltipCompletion` instead") alias parenCompletion = calltipCompletion;

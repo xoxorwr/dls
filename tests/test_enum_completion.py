@@ -99,6 +99,23 @@ void main()
 """
 
 
+STRUCT_CONSTRUCTION = """module app;
+
+enum Foo { A, B, C }
+
+struct Bar
+{
+    Foo foo;
+}
+
+void main()
+{
+    auto w1 = Bar(.);
+    auto w2 = Bar(foo: .);
+}
+"""
+
+
 class EnumDotShorthandTests(DlsTestCase):
     PROJECT = {
         "assign_prefix.d": wrap("    c = .Gr"),
@@ -110,6 +127,7 @@ class EnumDotShorthandTests(DlsTestCase):
         "comparison_no_identifier.d": COMPARISON_WITHOUT_IDENTIFIER,
         "call_in_assignment.d": CALL_IN_ASSIGNMENT,
         "call_in_lhs.d": CALL_IN_THE_LEFT_HAND_SIDE,
+        "struct_construction.d": STRUCT_CONSTRUCTION,
     }
 
     def test_assignment_with_partial_identifier(self):
@@ -182,3 +200,13 @@ class EnumDotShorthandTests(DlsTestCase):
         doc = self.open_doc("call_in_lhs.d")
         items = doc.completion("makeMotor().speed_tier = .Gr")["items"]
         self.assertEqual(labels(items), ["Green"])
+
+    def test_struct_literal_resolves_enum_field(self):
+        doc = self.open_doc("struct_construction.d")
+        items = doc.completion("Bar(.")["items"]
+        self.assertEqual(sorted(labels(items)), ["A", "B", "C"])
+
+    def test_struct_literal_named_argument_resolves_enum_field(self):
+        doc = self.open_doc("struct_construction.d")
+        items = doc.completion("Bar(foo: .")["items"]
+        self.assertEqual(sorted(labels(items)), ["A", "B", "C"])

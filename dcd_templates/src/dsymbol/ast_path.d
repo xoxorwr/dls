@@ -43,6 +43,8 @@ struct CursorContext
 	FunctionCallExpression call;
 	/// Zero based parameter index (`callArgument`).
 	size_t argumentIndex;
+	/// Parameter name when the cursor is in a named argument (`callArgument`).
+	string argumentName;
 }
 
 /// Byte offset just past `token`'s last token, or `token.index` when the
@@ -110,6 +112,7 @@ private class CursorContextVisitor : ASTVisitor
 		{
 			auto args = argsOf(n);
 			size_t index = 0;
+			string argName = null;
 			foreach (arg; args)
 			{
 				if (arg is null || arg.tokens.length == 0)
@@ -119,8 +122,10 @@ private class CursorContextVisitor : ASTVisitor
 				// before it count towards the parameter index.
 				if (endsBefore(arg, cursor))
 					index++;
+				else if (argName is null && arg.name.type == tok!"identifier")
+					argName = arg.name.text;
 			}
-			record(CursorContextKind.callArgument, null, n, index);
+			record(CursorContextKind.callArgument, null, n, index, argName);
 		}
 		super.visit(n);
 	}
@@ -145,7 +150,7 @@ private class CursorContextVisitor : ASTVisitor
 	}
 
 	private void record(CursorContextKind kind, const(ExpressionNode) expected,
-		const BaseNode node, size_t index = 0)
+		const BaseNode node, size_t index = 0, string argName = null)
 	{
 		auto span = node.tokens.length
 			? node.tokens[$ - 1].index - node.tokens[0].index
@@ -171,6 +176,7 @@ private class CursorContextVisitor : ASTVisitor
 		result.expected = cast(ExpressionNode) expected;
 		result.call = cast(FunctionCallExpression) node;
 		result.argumentIndex = index;
+		result.argumentName = argName;
 	}
 
 	/// True when the cursor sits inside `node`'s token span.
