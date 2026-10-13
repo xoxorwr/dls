@@ -26,6 +26,7 @@ module dsymbol.conversion.second.declared_type;
 import dsymbol.conversion.second.initializer : memberStep, resolveInitializerNode, typeSwap;
 import dsymbol.conversion.second.instantiate : instantiateFromNode;
 import dsymbol.deferred : Imports;
+import dsymbol.semantic : TypeLookups;
 import dsymbol.symbol;
 import dsymbol.scope_;
 import dsymbol.signature;
@@ -623,7 +624,7 @@ private istring renderIndexerDimension(const(ExpressionNode) indexer)
 	string dim;
 	if (indexer.tokens.length > 0)
 		foreach (t; indexer.tokens)
-			dim ~= t.text;
+			dim ~= t.text is null ? str(t.type) : t.text;
 	else
 		dim = renderText(indexer);
 	return dim.length > 0 ? internString(dim) : istring.init;
@@ -656,6 +657,274 @@ do
 		return;
 	DSymbol* nodeResult;
 	resolveTypeFromTypeNode(astType, symbol, lookup, moduleScope, cache, mapping, nodeResult);
+}
+
+/**
+ * Whether a declared `Type` needs its static-array shape finished from the
+ * initializer: an `auto` element type with array dims (`auto[$]`, `auto[3]`
+ * -- the parser records `auto` as a TypeIdentifier, the way dmd spells it)
+ * or any `$` dimension (`int[$]`).
+ */
+public bool typeNeedsStaticInference(const(Type) type)
+{
+	if (type is null || type.type2 is null)
+		return false;
+	auto tip = cast(TypeIdentifierPart) type.type2.typeIdentifierPart;
+	if (tip !is null && tip.typeIdentifierPart is null
+		&& tip.identifierOrTemplateInstance !is null
+		&& tip.identifierOrTemplateInstance.templateInstance is null
+		&& identifierName(tip) == "auto")
+	{
+		foreach (s; type.typeSuffixes)
+			if (s.array)
+				return true;
+	}
+	foreach (s; type.typeSuffixes)
+		if (s.array && renderArrayDimension(cast(TypeSuffix) s) == "$")
+			return true;
+	for (auto part = tip; part !is null; part = part.typeIdentifierPart)
+		if (part.indexer !is null && renderIndexerDimension(part.indexer) == "$")
+			return true;
+	return false;
+}
+
+/// One array-literal nesting level while inferring `$` lengths: the item
+/// count and the node the next inner `$` descends into.
+private struct InferredArrayLevel
+{
+	size_t length;
+	BaseNode firstElement;
+}
+
+/// The length of one literal level and where the next inner level lives.
+/// Both literal shapes occur: `[...] ` in initializer position is an
+/// `ArrayInitializer`, while a nested `[...]` inside it is an `ArrayLiteral`.
+private bool inferredArrayLevel(BaseNode node, out InferredArrayLevel level)
+{
+	if (auto ai = cast(ArrayInitializer) node)
+	{
+		BaseNode first = null;
+		if (ai.arrayMemberInitializations.length > 0)
+		{
+			auto m = ai.arrayMemberInitializations[0];
+			if (m !is null)
+				first = m.assignExpression !is null
+					? cast(BaseNode) m.assignExpression
+					: cast(BaseNode) m.nonVoidInitializer;
+		}
+		level = InferredArrayLevel(ai.arrayMemberInitializations.length, first);
+		return true;
+	}
+	if (auto al = cast(ArrayLiteral) node)
+	{
+		if (al.argumentList is null)
+		{
+			level = InferredArrayLevel(0, null);
+			return true;
+		}
+		BaseNode first = al.argumentList.items.length > 0
+			? cast(BaseNode) al.argumentList.items[0] : null;
+		level = InferredArrayLevel(al.argumentList.items.length, first);
+		return true;
+	}
+	return false;
+}
+
+/**
+ * Walks single-child wrappers (the initializer around its expression, a
+ * parenthesised/bare passthrough) down to the array literal itself. Anything
+ * else -- a call, an index, a variable -- is not a literal level and ends
+ * the walk with null.
+ */
+private BaseNode descendToArrayLiteral(BaseNode node)
+{
+	auto current = node;
+	while (current !is null)
+	{
+		if (cast(ArrayInitializer) current || cast(ArrayLiteral) current)
+			return current;
+		if (auto init = cast(Initializer) current)
+		{
+			if (init.nonVoidInitializer is null)
+				return null;
+			current = cast(BaseNode) init.nonVoidInitializer;
+		}
+		else if (auto nvi = cast(NonVoidInitializer) current)
+		{
+			if (nvi.arrayInitializer !is null)
+				return cast(BaseNode) nvi.arrayInitializer;
+			if (nvi.assignExpression is null)
+				return null;
+			current = cast(BaseNode) nvi.assignExpression;
+		}
+		else if (auto ex = cast(Expression) current)
+		{
+			if (ex.items.length != 1)
+				return null;
+			current = cast(BaseNode) ex.items[0];
+		}
+		else if (auto u = cast(UnaryExpression) current)
+		{
+			if (u.primaryExpression is null)
+				return null;
+			current = cast(BaseNode) u.primaryExpression;
+		}
+		else if (auto pe = cast(PrimaryExpression) current)
+		{
+			if (pe.arrayLiteral is null)
+				return null;
+			return cast(BaseNode) pe.arrayLiteral;
+		}
+		else
+			return null;
+	}
+	return null;
+}
+
+/**
+ * Finishes an inferred static array (`auto[$]`, `auto[3]`, `int[$]`) from
+ * its initializer: `$` lengths come from the literal nesting levels,
+ * an `auto` element from the deepest first element, and an explicit base
+ * (`int`) resolves the usual way.
+ *
+ * True when the type was set (nothing left for the normal loop to do).
+ * False leaves everything untouched for the normal lookups to resolve.
+ */
+public bool tryResolveInferredStaticArray(DSymbol* symbol, ref TypeLookups lookups,
+	Scope* moduleScope, ref ModuleCache cache, DSymbol*[string] mapping)
+{
+	Type declType = null;
+	BaseNode initNode = null;
+	foreach (lookup; lookups)
+	{
+		if (lookup.kind == TypeLookupKind.varOrFunType && declType is null)
+		{
+			auto t = cast(Type) lookup.astNode;
+			if (t !is null && typeNeedsStaticInference(t))
+				declType = t;
+		}
+		else if (lookup.kind == TypeLookupKind.initializer && initNode is null)
+			initNode = cast(BaseNode) lookup.astNode;
+	}
+	if (declType is null || initNode is null || moduleScope is null)
+		return false;
+	// A head template instance (`T!int[$]`) is not modelled: resolving the
+	// bare base would silently drop the arguments.
+	if (headTemplateInstance(declType) !is null)
+		return false;
+
+	// Dimensions inner first: an indexer (as in `int[3]`) is innermost,
+	// then the suffixes in source order (as in `auto[$][$]`).
+	struct Dim
+	{
+		bool dollar;
+		string text;
+	}
+	Dim[] dims;
+	for (auto part = cast(TypeIdentifierPart) declType.type2.typeIdentifierPart;
+		part !is null; part = part.typeIdentifierPart)
+	{
+		if (part.indexer is null)
+			continue;
+		auto rendered = renderIndexerDimension(part.indexer);
+		if (rendered.length == 0)
+			return false;
+		dims ~= Dim(rendered == "$", rendered.data);
+	}
+	foreach (s; declType.typeSuffixes)
+	{
+		if (!s.array)
+			return false;
+		auto rendered = renderArrayDimension(s);
+		if (rendered.length == 0)
+		{
+			dims ~= Dim(false, "");
+			continue;
+		}
+		dims ~= Dim(rendered == "$", rendered.data);
+	}
+	if (dims.length == 0)
+		return false;
+
+	// Literal levels outer first.
+	InferredArrayLevel[] levels;
+	for (BaseNode at = descendToArrayLiteral(initNode); at !is null;)
+	{
+		InferredArrayLevel level;
+		if (!inferredArrayLevel(at, level))
+			break;
+		levels ~= level;
+		if (level.firstElement is null)
+			break;
+		at = descendToArrayLiteral(level.firstElement);
+	}
+
+	// Every `$` (counted from the outside in) needs a literal level there.
+	const dimCount = dims.length;
+	const levelCount = levels.length;
+	for (size_t outer = 0; outer < dimCount; ++outer)
+	{
+		if (!dims[dimCount - 1 - outer].dollar)
+			continue;
+		if (outer >= levelCount)
+			return false;
+	}
+
+	// The element: an `auto` base resolves the deepest level's first item
+	// (`1` in `[1, 2]`); an explicit base (`int`) resolves the usual way.
+	// Mismatched nesting is left for the normal path.
+	auto tip = declType.type2.typeIdentifierPart;
+	const bool baseIsAuto = tip !is null && identifierName(tip) == "auto";
+	DSymbol* base = null;
+	if (baseIsAuto)
+	{
+		if (dimCount != levelCount || levels[levelCount - 1].firstElement is null)
+			return false;
+		BaseNode elementNode = levels[levelCount - 1].firstElement;
+		bool handled;
+		DSymbol* value;
+		TypeConstructorFlags unusedQualifiers;
+		resolveInitializerNode(elementNode, symbol, null, moduleScope, cache, mapping,
+			handled, value, unusedQualifiers);
+		if (!handled || value is null)
+			return false;
+		typeSwap(value, false);
+		if (value is null)
+			return false;
+		base = value;
+	}
+	else
+	{
+		DSymbol* resolved;
+		istring missingName;
+		if (resolveDeclaredType(declType, symbol, null, moduleScope, cache, mapping,
+				resolved, missingName) != TypeNodeOutcome.resolved || resolved is null)
+			return false;
+		base = resolved;
+	}
+
+	DSymbol* current = base;
+	for (size_t inner = 0; inner < dimCount; ++inner)
+	{
+		string dimText = dims[inner].text;
+		if (dims[inner].dollar)
+		{
+			import std.conv : to;
+			dimText = levels[levelCount - 1 - inner].length.to!string;
+		}
+		current = wrapTypeSymbol(ARRAY_SYMBOL_NAME, SymbolQualifier.array, current,
+			dimText.length > 0 ? internString(dimText) : istring.init, arraySymbols[]);
+		if (current is null)
+			return false;
+	}
+	auto qualifiers = collectTypeConstructors(declType);
+	symbol.flags.declaredTypeIsConst = qualifiers.isConst;
+	symbol.flags.declaredTypeIsImmutable = qualifiers.isImmutable;
+	symbol.flags.declaredTypeIsShared = qualifiers.isShared;
+	symbol.flags.declaredTypeIsInout = qualifiers.isInout;
+	symbol.type = current;
+	symbol.ownType = true;
+	return true;
 }
 
 /**
@@ -740,7 +1009,7 @@ private istring renderArrayDimension(const(TypeSuffix) suffix)
 	if (suffix.tokens.length > 2)
 	{
 		foreach (t; suffix.tokens[1 .. $ - 1])
-			dim ~= t.text;
+			dim ~= t.text is null ? str(t.type) : t.text;
 	}
 	else if (suffix.low !is null)
 		dim = renderText(suffix.low);

@@ -92,6 +92,27 @@ void f()
 }
 """
 
+MIXED = """module mixed;
+
+void allman()
+{
+    int a;
+}
+
+void knr() {
+    int b;
+}
+"""
+
+GAP = """module gap;
+
+void f()
+
+{
+    int a;
+}
+"""
+
 
 def pairs(ranges):
     """The (startLine, endLine) pairs of a folding range response."""
@@ -113,6 +134,8 @@ class FoldingRangeTests(DlsTestCase):
         "inline.d": INLINE,
         "tricky_text.d": TRICKY_TEXT,
         "nested_comment.d": NESTED_COMMENT,
+        "mixed.d": MIXED,
+        "gap.d": GAP,
     }
 
     def open_ranges(self, relpath):
@@ -121,36 +144,38 @@ class FoldingRangeTests(DlsTestCase):
 
     def test_block_spans_the_whole_function_body(self):
         doc, ranges = self.open_ranges("app.d")
-        open_line, _ = doc.position("{ //")
-        label_line, _ = doc.position("end:")
+        header_line, _ = doc.position("void fun()")
         close_line, _ = doc.position("int b;\n}")
+        label_line, _ = doc.position("end:")
 
-        self.assertEqual(pairs(ranges), {(open_line, close_line)})
+        # Allman `{` alone on its line pulls up to the header, so the fold
+        # reads `void fun() {...}` instead of `void fun()` + `{...}`.
+        self.assertEqual(pairs(ranges), {(header_line, close_line)})
         # The bug this replaced: a fold that stops at the dedented label.
-        self.assertNotIn((open_line, label_line), pairs(ranges))
+        self.assertNotIn((header_line, label_line), pairs(ranges))
 
     def test_nested_blocks_fold_separately(self):
         doc, ranges = self.open_ranges("nested.d")
-        outer_open, _ = doc.position("void outer()\n{")
-        inner_open, _ = doc.position("if (true)\n    {")
+        outer_header, _ = doc.position("void outer()")
+        inner_header, _ = doc.position("if (true)")
         inner_close, _ = doc.position("int a;\n    }")
         outer_close, _ = doc.position("int b;\n}")
 
-        self.assertEqual(pairs(ranges), {(outer_open, outer_close), (inner_open, inner_close)})
+        self.assertEqual(pairs(ranges), {(outer_header, outer_close), (inner_header, inner_close)})
 
-        outer = find(ranges, outer_open)
-        inner = find(ranges, inner_open)
+        outer = find(ranges, outer_header)
+        inner = find(ranges, inner_header)
         self.assertLessEqual(outer["startLine"], inner["startLine"])
         self.assertLessEqual(inner["endLine"], outer["endLine"])
 
     def test_text_outside_code_does_not_fold(self):
         doc, ranges = self.open_ranges("text_only.d")
-        open_line, _ = doc.position("void f()\n{")
+        header_line, _ = doc.position("void f()")
         close_line, _ = doc.position("int a;\n}")
 
         # The braces inside the string and the comments are text: only the
         # function's own block survives.
-        self.assertEqual(pairs(ranges), {(open_line, close_line)})
+        self.assertEqual(pairs(ranges), {(header_line, close_line)})
 
     def test_comments_fold_with_a_comment_kind(self):
         doc, ranges = self.open_ranges("comments.d")
@@ -175,25 +200,45 @@ class FoldingRangeTests(DlsTestCase):
 
     def test_token_strings_and_raw_strings_are_not_blocks(self):
         doc, ranges = self.open_ranges("tricky_text.d")
-        open_line, _ = doc.position("void f()\n{")
+        header_line, _ = doc.position("void f()")
         close_line, _ = doc.position("int a;\n}")
 
         # `q{...}`, `r"..."`, backticks and a character literal each hide their
         # braces inside one token, so the function block is all there is.
-        self.assertEqual(pairs(ranges), {(open_line, close_line)})
+        self.assertEqual(pairs(ranges), {(header_line, close_line)})
 
     def test_nested_comment_folds_as_one_comment(self):
         doc, ranges = self.open_ranges("nested_comment.d")
         start_line, _ = doc.position("/+ outer")
         end_line, _ = doc.position("still outer\n+/")
-        open_line, _ = doc.position("void f()\n{")
+        header_line, _ = doc.position("void f()")
         close_line, _ = doc.position("int a;\n}")
 
         self.assertEqual(
-            pairs(ranges), {(start_line, end_line), (open_line, close_line)}
+            pairs(ranges), {(start_line, end_line), (header_line, close_line)}
         )
         comment = find(ranges, start_line)
         self.assertEqual(comment["kind"], "comment")
+
+    def test_mixed_styles_both_start_on_the_header(self):
+        doc, ranges = self.open_ranges("mixed.d")
+        allman_header, _ = doc.position("void allman()")
+        allman_close, _ = doc.position("int a;\n}")
+        knr_header, _ = doc.position("void knr()")
+        knr_close, _ = doc.position("int b;\n}")
+
+        # Allman pulls up, K&R already starts on the header: both read
+        # `void ...() {...}` when collapsed.
+        self.assertEqual(
+            pairs(ranges), {(allman_header, allman_close), (knr_header, knr_close)}
+        )
+
+    def test_blank_lines_between_header_and_brace(self):
+        doc, ranges = self.open_ranges("gap.d")
+        header_line, _ = doc.position("void f()")
+        close_line, _ = doc.position("int a;\n}")
+
+        self.assertEqual(pairs(ranges), {(header_line, close_line)})
 
     def test_ranges_are_ordered_and_nested(self):
         for relpath in (
@@ -203,6 +248,8 @@ class FoldingRangeTests(DlsTestCase):
             "comments.d",
             "tricky_text.d",
             "nested_comment.d",
+            "mixed.d",
+            "gap.d",
         ):
             doc, ranges = self.open_ranges(relpath)
             line_count = doc.text.count("\n")

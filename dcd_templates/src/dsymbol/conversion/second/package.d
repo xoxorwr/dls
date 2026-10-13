@@ -25,7 +25,7 @@ public import dsymbol.conversion.second.initializer : BinaryKind, binaryResultTy
 	promotedScalarName, resolveTypeFromInitializer, typeSwap;
 import dsymbol.conversion.second.inheritance : resolveInheritance, resolveAliasThis,
 	resolveMixinTemplates;
-import dsymbol.conversion.second.declared_type : aliasNeedsRetry;
+import dsymbol.conversion.second.declared_type : aliasNeedsRetry, tryResolveInferredStaticArray;
 import dsymbol.semantic;
 import dsymbol.string_interning;
 import dsymbol.symbol;
@@ -223,6 +223,10 @@ private:
 void resolveType(DSymbol* symbol, ref TypeLookups typeLookups,
 	Scope* moduleScope, ref ModuleCache cache, DSymbol*[string] mapping = null)
 {
+	// `auto[$]` / `int[$]`: the declared type and the initializer resolve
+	// together (neither alone models the shape); a hit sets the type.
+	if (tryResolveInferredStaticArray(symbol, typeLookups, moduleScope, cache, mapping))
+		return;
 	// going through the lookups
 	foreach(lookup; typeLookups) {
 		if (lookup.kind == TypeLookupKind.varOrFunType)

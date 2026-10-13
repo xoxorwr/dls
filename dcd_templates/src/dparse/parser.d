@@ -2531,6 +2531,7 @@ class Parser
             else
                 goto type;
         case tok!".":
+        case tok!"auto":
         case tok!"const":
         case tok!"immutable":
         case tok!"inout":
@@ -7765,6 +7766,20 @@ class Parser
             mixin (nullCheck!`(node.type = parseType())`);
             mixin(tokenCheck!")");
             break;
+        case tok!"auto":
+            // `auto` as an element type (`auto[$] x = [...]`): dmd spells
+            // the inferred element as a TypeIdentifier named `auto`, so
+            // record it the same way. The `[$]`/`[n]` that follows is left
+            // for parseType's suffix loop, matching dmd's TypeSArray shape.
+            auto autoToken = advance();
+            auto autoTip = allocator.make!TypeIdentifierPart;
+            auto autoIoti = allocator.make!IdentifierOrTemplateInstance;
+            autoIoti.identifier = Token(tok!"identifier", "auto",
+                autoToken.line, autoToken.column, autoToken.index);
+            autoTip.identifierOrTemplateInstance = autoIoti;
+            autoTip.tokens = tokens[startIndex .. index];
+            node.typeIdentifierPart = autoTip;
+            break;
         case tok!"__vector":
             if ((node.vector = parseVector()) is null)
                 return null;
@@ -8919,6 +8934,12 @@ protected: final:
         case tok!"override":
         case tok!"abstract":
         case tok!"auto":
+            // `auto[$]` is an inferred static array *type*, not a storage
+            // class: `auto` followed by `[` must reach the declaration's
+            // type parser instead of being eaten as an attribute here.
+            if (peekIs(tok!"["))
+                return false;
+            return true;
         case tok!"__gshared":
         case tok!"pure":
         case tok!"nothrow":

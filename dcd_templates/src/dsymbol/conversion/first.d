@@ -25,6 +25,7 @@ import dparse.lexer;
 import dsymbol.builtin.names;
 import dsymbol.builtin.symbols;
 import dsymbol.cache_entry;
+import dsymbol.conversion.second.declared_type : typeNeedsStaticInference;
 import dsymbol.import_;
 import dsymbol.modulecache;
 import dsymbol.scope_;
@@ -355,6 +356,12 @@ final class FirstPass : ASTVisitor
 				declarator.name.text, kind,
 				symbolFile, declarator.name.index);
 			addTypeWithContext(symbol, dec.type);
+			// `auto[$]` / `int[$]`: the static shape is finished from the
+			// initializer in the second pass, so record it alongside the
+			// declared type (which alone leaves `$` / `auto` unmodelled).
+			if (declarator.initializer !is null
+				&& typeNeedsStaticInference(dec.type))
+				populateInitializer(symbol, declarator.initializer);
 			symbol.parent = currentSymbol;
 			symbol.acSymbol.protection = protection.current;
 			symbol.acSymbol.doc = makeDocumentation(declarator.comment);

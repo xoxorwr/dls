@@ -1073,6 +1073,15 @@ private size_t countNewlines(scope const(char)[] text) pure nothrow @safe @nogc
  * A bracket whose partner has not been typed yet is left alone rather than
  * guessed at: the file is usually being edited.
  *
+ * An opening bracket alone on its line (Allman style) folds from the header
+ * above it, so both styles collapse the same way:
+ *
+ * ---
+ * void myfn()   // K&R `void myfn() {` already starts here;
+ * {             // Allman `{` is pulled up to here.
+ * }
+ * ---
+ *
  * Ranges come back sorted, outermost first: clients reject a list where a
  * folded range starts before the one containing it.
  */
@@ -1101,8 +1110,14 @@ extern(C) export DCFoldingRange[] dcd_folding_ranges(const(char)* filename, cons
     {
         IdType type;
         size_t line;
+        size_t start0;
     }
     OpenBracket[] stack;
+
+    // End line of the previous token: blank lines carry no token, so the gap
+    // between it and an opening bracket is skipped without scanning text.
+    size_t prevEndLine;
+    bool havePrev;
 
     // A run of whole line `//` comments that is still going.
     size_t runStart;
@@ -1120,10 +1135,13 @@ extern(C) export DCFoldingRange[] dcd_folding_ranges(const(char)* filename, cons
     {
         auto token = lexer.front;
         lexer.popFront();
+        // End line of this token: block comments and multi-line strings span
+        // lines, everything else ends where it starts.
+        auto tokenEndLine = token.line + countNewlines(token.text);
 
         if (token.type == tok!"comment")
         {
-            auto endLine = token.line + countNewlines(token.text);
+            auto endLine = tokenEndLine;
             if (endLine > token.line)
             {
                 // A block comment over several lines folds on its own.
@@ -1145,12 +1163,23 @@ extern(C) export DCFoldingRange[] dcd_folding_ranges(const(char)* filename, cons
             }
             else
                 flushRun();
+            prevEndLine = endLine;
+            havePrev = true;
             continue;
         }
 
         auto type = token.type;
         if (type == tok!"{" || type == tok!"(" || type == tok!"[")
-            stack ~= OpenBracket(type, token.line);
+        {
+            // A lone `{` (Allman) pulls up to the previous token's line, so
+            // `void myfn()` + `{` folds from the header; a trailing `{` (K&R)
+            // shares its line with the header and stays where it is. Only
+            // tokens decide: no text is scanned.
+            size_t start0 = token.line - 1;
+            if (type == tok!"{" && havePrev && prevEndLine < token.line)
+                start0 = prevEndLine - 1;
+            stack ~= OpenBracket(type, token.line, start0);
+        }
         else if (type == tok!"}" || type == tok!")" || type == tok!"]")
         {
             auto want = type == tok!"}" ? tok!"{" : (type == tok!")" ? tok!"(" : tok!"[");
@@ -1165,10 +1194,13 @@ extern(C) export DCFoldingRange[] dcd_folding_ranges(const(char)* filename, cons
             {
                 auto open = stack[match - 1];
                 stack.length = match - 1;
-                if (token.line > open.line)
-                    ret ~= DCFoldingRange(open.line - 1, token.line - 1, null);
+                size_t end0 = token.line - 1;
+                if (end0 > open.start0)
+                    ret ~= DCFoldingRange(open.start0, end0, null);
             }
         }
+        prevEndLine = tokenEndLine;
+        havePrev = true;
     }
     flushRun();
 
