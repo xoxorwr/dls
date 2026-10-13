@@ -429,6 +429,101 @@ private InitializerResolution evalInitializerExpr(const(BaseNode) e, DSymbol* sy
 // The result of one binary operator over two operands.  `typeSwap(...,
 // false)` keeps an alias name, so a `string` operand stays a `string`
 // instead of becoming the array type.
+private bool opBinaryParamMatches(DSymbol* paramType, DSymbol* argType)
+{
+	if (paramType is null || argType is null)
+		return false;
+	DSymbol* p = paramType;
+	DSymbol* a = argType;
+	typeSwap(p, false);
+	typeSwap(a, false);
+	if (p is null || a is null)
+		return false;
+	// Generic `T rhs` matches anything.
+	if (p.kind == CompletionKind.typeTmpParam)
+		return true;
+	return p.name.data == a.name.data;
+}
+
+// `a <op> b` over a user type: `a.opBinary!"<op>"(b)`, falling back to
+// `b.opBinaryRight!"<op>"(a)`.  The `string op` template argument is
+// deliberately not evaluated -- most definitions take `string op` and
+// branch inside (`if (op == "-") ...`), so matching the runtime parameter
+// against the other operand and taking the return type covers them.
+private bool tryOpBinary(DSymbol* left, DSymbol* right, out DSymbol* result)
+{
+	result = null;
+	if (left is null || right is null)
+		return false;
+	auto overloads = left.getPartsByName(internString("opBinary"));
+	foreach (cand; overloads)
+	{
+		if (cand is null || cand.functionParameters.length != 1)
+			continue;
+		auto param = cand.functionParameters[0];
+		if (param is null || param.type is null)
+			continue;
+		if (!opBinaryParamMatches(param.type, right))
+			continue;
+		DSymbol* ret = cand.type;
+		if (ret is null)
+			continue;
+		DSymbol* swappedRet = ret;
+		typeSwap(swappedRet, false);
+		if (swappedRet !is null && swappedRet.kind == CompletionKind.typeTmpParam)
+		{
+			DSymbol* swappedParam = param.type;
+			typeSwap(swappedParam, false);
+			if (swappedParam !is null && swappedParam.kind == CompletionKind.typeTmpParam
+				&& swappedParam.name == swappedRet.name)
+			{
+				result = right;
+				return true;
+			}
+			continue;
+		}
+		if (swappedRet !is null)
+		{
+			result = swappedRet;
+			return true;
+		}
+	}
+	auto rightOverloads = right.getPartsByName(internString("opBinaryRight"));
+	foreach (cand; rightOverloads)
+	{
+		if (cand is null || cand.functionParameters.length != 1)
+			continue;
+		auto param = cand.functionParameters[0];
+		if (param is null || param.type is null)
+			continue;
+		if (!opBinaryParamMatches(param.type, left))
+			continue;
+		DSymbol* ret = cand.type;
+		if (ret is null)
+			continue;
+		DSymbol* swappedRet = ret;
+		typeSwap(swappedRet, false);
+		if (swappedRet !is null && swappedRet.kind == CompletionKind.typeTmpParam)
+		{
+			DSymbol* swappedParam = param.type;
+			typeSwap(swappedParam, false);
+			if (swappedParam !is null && swappedParam.kind == CompletionKind.typeTmpParam
+				&& swappedParam.name == swappedRet.name)
+			{
+				result = left;
+				return true;
+			}
+			continue;
+		}
+		if (swappedRet !is null)
+		{
+			result = swappedRet;
+			return true;
+		}
+	}
+	return false;
+}
+
 private bool evalBinaryResult(BinaryKind kind, const(ExpressionNode) leftNode,
 	const(ExpressionNode) rightNode, DSymbol* symbol, Scope* moduleScope, ref ModuleCache cache,
 	DSymbol*[string] mapping, out DSymbol* result)
@@ -467,16 +562,26 @@ private bool evalBinaryResult(BinaryKind kind, const(ExpressionNode) leftNode,
 	}
 	}
 	auto name = binaryResultTypeName(kind, leftOperand, rightOperand);
-	if (name is null)
-		return false;
-	result = builtinType(name, symbol, moduleScope, mapping);
-	return result !is null;
+	if (name !is null)
+	{
+		result = builtinType(name, symbol, moduleScope, mapping);
+		return result !is null;
+	}
+	// Not a builtin scalar shape: `+ - * / % & | ^ ^^ ~ << >> >>>` over a
+	// user type resolve through `opBinary` / `opBinaryRight` (see
+	// `tryOpBinary`).  A comparison / logical stays a `bool` and never
+	// reaches here.
+	if (kind == BinaryKind.arithmetic || kind == BinaryKind.concatenation
+		|| kind == BinaryKind.shift)
+		return tryOpBinary(leftOperand, rightOperand, result);
+	return false;
 }
 
 // `a <op> b`: dparse has one class per operator (see the casts below),
-// and the class says what the result is.  Anything else -- an
-// overloaded `opBinary`, an enum member's base type -- stays
-// unmodelled and leaves the symbol untyped.
+// and the class says what the result is for builtin scalars.  Anything else
+// tries `opBinary` / `opBinaryRight` first (see `tryOpBinary`); only an
+// unmodelled shape -- an enum member's base type, no matching overload --
+// leaves the symbol untyped.
 private bool evalBinary(const(BaseNode) node, DSymbol* symbol, Scope* moduleScope,
 	ref ModuleCache cache, DSymbol*[string] mapping, out DSymbol* result)
 {

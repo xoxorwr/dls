@@ -292,3 +292,148 @@ class AutoReturnTypeTests(DlsTestCase):
         """
         doc = self.open_doc("imported_auto_app.d")
         self.assertIn("size", labels(doc.completion("w.si")["items"]))
+
+
+OPBINARY_LIB = """module opbinary_lib;
+
+struct Timespan
+{
+    ulong ticks;
+    ulong frequency;
+
+    double msecs()
+    {
+        return 0;
+    }
+
+    Timespan opBinary(string op : "-")(Timespan other)
+    {
+        return Timespan(ticks - other.ticks, frequency);
+    }
+}
+
+Timespan now()
+{
+    return Timespan(0, 0);
+}
+"""
+
+OPBINARY_APP = """module opbinary_app;
+
+import opbinary_lib;
+
+void main()
+{
+    auto start = now();
+    auto elapsed = now() - start;
+    elapsed.ms
+}
+"""
+
+OPBINARY_INNER_LIB = """module opbinary_inner_lib;
+
+struct Vec
+{
+    int x;
+
+    int length()
+    {
+        return x;
+    }
+
+    Vec opBinary(string op)(Vec rhs)
+    {
+        if (op == "+") return Vec(x + rhs.x);
+        else if (op == "-") return Vec(x - rhs.x);
+        else return Vec(0);
+    }
+}
+
+Vec makeVec()
+{
+    return Vec(0);
+}
+"""
+
+OPBINARY_INNER_APP = """module opbinary_inner_app;
+
+import opbinary_inner_lib;
+
+void main()
+{
+    auto a = makeVec();
+    auto b = makeVec();
+    auto c = a + b;
+    c.le
+}
+"""
+
+OPBINARY_RIGHT_LIB = """module opbinary_right_lib;
+
+struct Lhs
+{
+    int a;
+}
+
+struct Rhs
+{
+    int b;
+
+    int probe()
+    {
+        return b;
+    }
+
+    Rhs opBinaryRight(string op)(Lhs lhs)
+    {
+        return Rhs(lhs.a + 1);
+    }
+}
+"""
+
+OPBINARY_RIGHT_APP = """module opbinary_right_app;
+
+import opbinary_right_lib;
+
+void main()
+{
+    auto l = Lhs(1);
+    auto r = Rhs(2);
+    auto rr = l - r;
+    rr.pr
+}
+"""
+
+
+class AutoOpBinaryTests(DlsTestCase):
+    """`auto x = a - b` over a user `opBinary` overload.
+
+    The builtin operator table only models scalar promotion, so without an
+    `opBinary` fallback `auto elapsed = now() - start` stays untyped (`???`).
+    The `string op` template argument is deliberately not evaluated: most
+    definitions take `string op` and branch inside, so matching the runtime
+    parameter against the other operand and taking the return type covers
+    them (`Timespan opBinary(string op : "-")(Timespan)`, a single
+    `opBinary(string op)(Vec)` handling every operator, and `opBinaryRight`).
+    """
+
+    PROJECT = {
+        "opbinary_lib.d": OPBINARY_LIB,
+        "opbinary_app.d": OPBINARY_APP,
+        "opbinary_inner_lib.d": OPBINARY_INNER_LIB,
+        "opbinary_inner_app.d": OPBINARY_INNER_APP,
+        "opbinary_right_lib.d": OPBINARY_RIGHT_LIB,
+        "opbinary_right_app.d": OPBINARY_RIGHT_APP,
+    }
+
+    def test_opbinary_specialized_to_minus(self):
+        doc = self.open_doc("opbinary_app.d")
+        self.assertIn("msecs", labels(doc.completion("elapsed.ms")["items"]))
+
+    def test_opbinary_with_branch_inside(self):
+        doc = self.open_doc("opbinary_inner_app.d")
+        self.assertIn("length", labels(doc.completion("c.le")["items"]))
+
+    def test_opbinary_right(self):
+        doc = self.open_doc("opbinary_right_app.d")
+        self.assertIn("probe", labels(doc.completion("rr.pr")["items"]))
