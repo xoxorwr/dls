@@ -658,15 +658,9 @@ DSymbol*[] getSymbolsByTokenChain(T)(Scope* completionScope,
 	else
 		symbols = completionScope.getSymbolsByNameAndCursor(stringToken(tokens[0]), cursorPosition);
 
+	//TODO: better bugfix for issue #368, see test case 52 or pull #371
 	if (symbols.length == 0)
-	{
-		//TODO: better bugfix for issue #368, see test case 52 or pull #371
-		if (tokens.length)
-			warning("Could not find declaration of ", stringToken(tokens[0]),
-				" from position ", cursorPosition);
-		else assert(0, "internal error");
 		return [];
-	}
 
 	// If the `symbols` array contains functions, and one of them returns
 	// void and the others do not, this is a property function. For the
