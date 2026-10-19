@@ -298,34 +298,32 @@ struct ModuleCache
 		resolveDeferredTypes(cachedLocation);
 
 		if (oldEntry !is null)
-		{
 		    generateUpdatePairs(oldEntry.symbol, newEntry.symbol, updatePairs);
 
-		    HashSet!istring _rg;
-			void update_dependen(istring l, ref HashSet!istring rg)
-			{
-			  foreach (c; cache[])
-			  {
-			      if (!c.dependencies.contains(l)) continue;
-			      if (rg.contains(c.path)) continue;
-			      rg.insert(c.path);
-			      warning("  update dep: ", c.path);
-			      c.symbol.updateTypes(updatePairs);
+		HashSet!istring _rg;
+		void update_dependen(istring l, ref HashSet!istring rg)
+		{
+		  foreach (c; cache[])
+		  {
+		      if (!c.dependencies.contains(l)) continue;
+		      if (rg.contains(c.path)) continue;
+		      rg.insert(c.path);
+		      warning("  update dep: ", c.path);
+		      if (oldEntry !is null)
+		          c.symbol.updateTypes(updatePairs);
 
-			      HashSet!size_t visited;
-			      tryResolveUnresolvedTypes(c.symbol, c.symbol, this, visited);
+		      HashSet!size_t visited;
+		      tryResolveUnresolvedTypes(c.symbol, c.symbol, this, visited);
 
-			      update_dependen(c.path, rg);
-			  }
-			}
-		    update_dependen(cachedLocation, _rg);
+		      update_dependen(c.path, rg);
+		  }
+		}
+		update_dependen(cachedLocation, _rg);
 
+		if (oldEntry !is null)
+		{
 		    // Safe to free only now
 		    CacheAllocator.instance.dispose(oldEntry);
-		}
-		else
-		{
-		    warning("mod: ", location, " didn't have old entry");
 		}
 
 		// Force re-cache modules that had deferred symbols resolved —

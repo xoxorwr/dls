@@ -24,6 +24,7 @@ import dsymbol.semantic;
 import dsymbol.symbol;
 import dsymbol.string_interning;
 import dsymbol.deferred;
+import dsymbol.builtin.names;
 
 import containers.hashset;
 import std.stdio;
@@ -126,26 +127,33 @@ void resolvePart(DSymbol* part, Scope* sc, ref ModuleCache cache, ref HashSet!si
             if (part.symbolFile == "stdin") return;
             if (part.symbolFile.length == 0) return; // custom object.d stuff
             auto moduleSymbol = cache.getModuleSymbol(part.symbolFile);
+            if (moduleSymbol is null) return;
             auto first = moduleSymbol.getFirstPartNamed(istring(typeName));
             if (first !is null)
             {
                 part.type = first;
                 return;
             }
-            else
+            DSymbol importSym = DSymbol(IMPORT_SYMBOL_NAME);
+            foreach (im; moduleSymbol.parts.equalRange(SymbolOwnership(&importSym)))
             {
-                // type couldn't be found, that's stuff like templates
-                // now we could try to resolve them!
-                // warning("can't resolve: ", part.name, " callTip: ", typeName);
-                return;
+                if (im.type !is null)
+                {
+                    auto typeSym = im.type.getFirstPartNamed(istring(typeName));
+                    if (typeSym !is null)
+                    {
+                        part.type = typeSym;
+                        return;
+                    }
+                }
             }
+            return;
         }
     }
 
     if (part.type !is null)
     {
-        import std;
-        //writeln("check: ", part.type.name, " ", part.type.type, " ", part.type.qualifier, " ", part.type.kind);
+        resolvePart(part.type, sc, cache, visited);
         foreach (typePart; part.type.opSlice())
         {
             resolvePart(typePart, sc, cache, visited);

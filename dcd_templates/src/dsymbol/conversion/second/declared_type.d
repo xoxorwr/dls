@@ -70,6 +70,8 @@ private DSymbol* wrapTypeSymbol(R)(istring marker, SymbolQualifier qualifier, DS
 	auto next = GCAllocator.instance.make!DSymbol(marker, CompletionKind.dummy, inner);
 	next.qualifier = qualifier;
 	next.ownType = false;
+	if (inner !is null)
+		next.symbolFile = inner.symbolFile;
 	if (dimension.length > 0)
 		next.setRenderedText(GCAllocator.instance.make!RenderedText(dimension));
 	next.addChildren(children, false);
@@ -212,6 +214,12 @@ private bool resolveTypeFromTypeNode(const(Type) type, DSymbol* symbol, TypeLook
 			symbol.ownType = false;
 			result = base;
 		}
+		else if (base !is null)
+		{
+			symbol.type = base;
+			symbol.ownType = true;
+			result = base;
+		}
 		else
 		{
 			// The base name is not in scope here: record it for the name-based
@@ -227,11 +235,12 @@ private bool resolveTypeFromTypeNode(const(Type) type, DSymbol* symbol, TypeLook
 	// `foreach_reverse` over its popped suffix list.  A base that could not be
 	// resolved leaves the deferred name on the innermost suffix, which is where
 	// the crumb walk leaves it too.
-	istring deferredName = outcome == TypeNodeOutcome.resolved ? istring.init : missingName;
+	istring deferredName = (outcome == TypeNodeOutcome.resolved || base !is null) ? istring.init : missingName;
 	DSymbol* current = base;
 	foreach (suffix; type.typeSuffixes)
 	{
 		auto next = wrapTypeSuffix(current, suffix);
+		next.symbolFile = symbol.symbolFile;
 		if (current is null && deferredName.length > 0)
 		{
 			next.typeSymbolName = deferredName;
@@ -543,6 +552,14 @@ private TypeNodeOutcome resolveTypeIdentifierChain(const TypeIdentifierPart tip,
 				if (symbols.length == 0)
 				{
 					missingName = name;
+					if (part.indexer !is null)
+					{
+						auto next = wrapTypeSymbol(ARRAY_SYMBOL_NAME, SymbolQualifier.array, null,
+							renderIndexerDimension(part.indexer), arraySymbols[]);
+						next.typeSymbolName = missingName;
+						next.symbolFile = symbol.symbolFile;
+						current = next;
+					}
 					return TypeNodeOutcome.unresolved;
 				}
 				current = symbols[0];
@@ -564,7 +581,18 @@ private TypeNodeOutcome resolveTypeIdentifierChain(const TypeIdentifierPart tip,
 				return TypeNodeOutcome.unresolved;
 			current = current.getFirstPartNamed(name);
 			if (current is null)
+			{
+				missingName = name;
+				if (part.indexer !is null)
+				{
+					auto next = wrapTypeSymbol(ARRAY_SYMBOL_NAME, SymbolQualifier.array, null,
+						renderIndexerDimension(part.indexer), arraySymbols[]);
+					next.typeSymbolName = missingName;
+					next.symbolFile = symbol.symbolFile;
+					current = next;
+				}
 				return TypeNodeOutcome.unresolved;
+			}
 		}
 
 		// `TypeIdentifierPart.indexer` is a static array dimension (or a type
