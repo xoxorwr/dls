@@ -62,6 +62,7 @@ class DebounceTests(DlsTestCase):
 
     def test_a_burst_of_changes_produces_exactly_one_publish_after_it_settles(self):
         doc = self.open_doc("app.d")
+        self._wait_for_unused_import(doc, 0)
         # The didOpen publish (eager) is not what is being measured here.
         start = len(self.client.notifications())
 

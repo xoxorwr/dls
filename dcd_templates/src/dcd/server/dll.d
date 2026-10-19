@@ -318,23 +318,47 @@ struct DWorkspaceSymbolInfo
     ubyte kind;
     string file;
     size_t location;
+    uint line;
+    uint character;
 }
 
 /**
  * Answers `workspace/symbol`: every project symbol whose name contains
  * 'query' (case-insensitive), across every module under 'projectPaths'.
  *
- * Scanning is scoped to 'projectPaths' (see 'ModuleCache.getWorkspaceSymbols')
- * so this does not force-parse the compiler's own stdlib import paths - only
- * whatever the caller already registered as the project's own paths.
- * Recursion into a symbol's children stops at anything that is not itself a
- * container (struct/class/interface/union/enum/template/module), so a
- * function's parameters and locals never show up as separate results.
+ * Scanned from the pre-indexed 'entry.workspaceSymbols' on each module's
+ * CacheEntry, which is extracted during 'cacheModule'. No AST recursion,
+ * no disk reads, and positions (line/col) are precomputed.
  */
-extern(C) export DWorkspaceSymbolInfo[] dcd_workspace_symbols(string query, string[] projectPaths)
+private bool containsCaseInsensitive(string haystack, string needleLower) pure nothrow @nogc @safe
 {
-    import std.algorithm.searching : canFind;
-    import std.uni : toLower;
+    if (needleLower.length == 0) return true;
+    if (haystack.length < needleLower.length) return false;
+
+    static char asciiLower(char c) pure nothrow @nogc @safe
+    {
+        return (c >= 'A' && c <= 'Z') ? cast(char)(c + 32) : c;
+    }
+
+    size_t limit = haystack.length - needleLower.length;
+    outer: foreach (i; 0 .. limit + 1)
+    {
+        foreach (j; 0 .. needleLower.length)
+        {
+            if (asciiLower(haystack[i + j]) != needleLower[j])
+                continue outer;
+        }
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Workspace symbol search: returns declarations whose name contains
+ * 'query' (case-insensitive), across every module under 'projectPaths'.
+ */
+extern(C) export DWorkspaceSymbolInfo[] dcd_workspace_symbols(string query, string[] projectPaths, size_t maxResults = 100)
+{
     import dsymbol.modulecache;
 
     DWorkspaceSymbolInfo[] ret;
@@ -350,44 +374,45 @@ extern(C) export DWorkspaceSymbolInfo[] dcd_workspace_symbols(string query, stri
         return false;
     }
 
-    bool isContainer(CompletionKind k)
+    char[128] needleBuf = void;
+    string needle;
+    if (query.length <= needleBuf.length)
     {
-        switch (k)
-        {
-            case CompletionKind.className:
-            case CompletionKind.interfaceName:
-            case CompletionKind.structName:
-            case CompletionKind.unionName:
-            case CompletionKind.enumName:
-            case CompletionKind.templateName:
-            case CompletionKind.mixinTemplateName:
-            case CompletionKind.moduleName:
-                return true;
-            default:
-                return false;
-        }
+        foreach (i, c; query)
+            needleBuf[i] = (c >= 'A' && c <= 'Z') ? cast(char)(c + 32) : c;
+        needle = cast(string) needleBuf[0 .. query.length];
     }
-
-    auto needle = query.toLower();
-
-    void walk(DSymbol* it)
+    else
     {
-        foreach (sym; it.opSlice())
-        {
-            if (sym.generated) continue;
-            if (!isPublicCompletionKind(sym.kind)) continue;
-            if (!inProject(sym.symbolFile)) continue;
-
-            if (sym.name.length && sym.name.toLower().canFind(needle))
-                ret ~= DWorkspaceSymbolInfo(sym.name.idup, cast(ubyte) sym.kind, sym.symbolFile.idup, sym.location);
-
-            if (isContainer(sym.kind))
-                walk(sym);
-        }
+        import std.uni : toLower;
+        needle = query.toLower();
     }
 
     foreach (entry; cache.getWorkspaceSymbols(projectPaths))
-        walk(entry.symbol);
+    {
+        if (maxResults > 0 && ret.length >= maxResults)
+            break;
+
+        if (!inProject(entry.path))
+            continue;
+
+        foreach (ref sym; entry.workspaceSymbols)
+        {
+            if (sym.name.length && containsCaseInsensitive(sym.name, needle))
+            {
+                ret ~= DWorkspaceSymbolInfo(
+                    sym.name,
+                    sym.kind,
+                    entry.path.data,
+                    sym.location,
+                    sym.line,
+                    sym.character
+                );
+                if (maxResults > 0 && ret.length >= maxResults)
+                    break;
+            }
+        }
+    }
 
     return ret;
 }

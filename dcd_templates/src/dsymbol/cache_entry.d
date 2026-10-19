@@ -5,6 +5,15 @@ import std.datetime;
 import containers.openhashset;
 import containers.unrolledlist;
 
+struct CachedWorkspaceSymbol
+{
+    string name;
+    ubyte kind;
+    size_t location;
+    uint line;
+    uint character;
+}
+
 /**
  * Module cache entry
  */
@@ -27,6 +36,12 @@ struct CacheEntry
 	/// Hash of the source this entry was parsed from, so an unchanged save can
 	/// skip re-parsing it (see ModuleCache.sourceUnchanged).
 	ulong contentHash;
+
+	/// Line start offsets for fast byte-to-position binary search
+	uint[] lineOffsets;
+
+	/// Pre-extracted flat workspace symbols for this module
+	CachedWorkspaceSymbol[] workspaceSymbols;
 
 	~this()
 	{

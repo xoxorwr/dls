@@ -178,8 +178,6 @@ struct ModuleCache
 	    if (!needsReparsing(cachedLocation) && content.ptr == null && !force)
 	        return getEntryFor(cachedLocation).symbol;
 
-	    scope(exit) GC.collect();
-
 	    warning("caching: ", location, " content: ", content.ptr);
 
 	    recursionGuard.insert(&cachedLocation.data[0]);
@@ -273,6 +271,8 @@ struct ModuleCache
 	    newEntry.modificationTime = modification;
 	    newEntry.path = cachedLocation;
 	    newEntry.contentHash = hashSource(source[0 .. sourceLength]);
+	    newEntry.lineOffsets = computeLineOffsets(source[0 .. sourceLength]);
+	    newEntry.workspaceSymbols = extractWorkspaceSymbols(newEntry.symbol, cachedLocation, newEntry.lineOffsets);
 
 		CacheEntry* oldEntry = getEntryFor(cachedLocation);
 
@@ -679,7 +679,15 @@ struct ModuleCache
 	 */
 	auto getWorkspaceSymbols(const string[] paths)
 	{
-		scanMatching((const ref ImportPath ip) => paths.canFind(ip.path));
+		scanMatching((const ref ImportPath ip) {
+			foreach (p; paths)
+			{
+				if (ip.path == p) return true;
+				if (ip.path.length > p.length && ip.path[0 .. p.length] == p) return true;
+				if (p.length > ip.path.length && p[0 .. ip.path.length] == ip.path) return true;
+			}
+			return false;
+		});
 		return cache[];
 	}
 
@@ -882,3 +890,85 @@ else version (Posix)
 		assert(!existsAnd!isFile(`/bin`));
 	}
 }
+
+private uint[] computeLineOffsets(const(ubyte)[] source)
+{
+	uint[] offsets;
+	offsets.reserve(source.length / 32 + 1);
+	offsets ~= 0;
+	foreach (size_t i, b; source)
+	{
+		if (b == '\n')
+			offsets ~= cast(uint)(i + 1);
+	}
+	return offsets;
+}
+
+private void byteToLineCol(const(uint)[] lineOffsets, size_t location, out uint outLine, out uint outCol) nothrow pure @safe
+{
+	if (lineOffsets.length == 0)
+	{
+		outLine = 0;
+		outCol = 0;
+		return;
+	}
+
+	import std.range : assumeSorted;
+	auto sorted = lineOffsets.assumeSorted;
+	auto r = sorted.lowerBound(cast(uint) location + 1);
+	uint line = r.length > 0 ? cast(uint) r.length - 1 : 0;
+	uint lineStart = lineOffsets[line];
+	uint col = cast(uint)(location >= lineStart ? location - lineStart : 0);
+
+	outLine = line;
+	outCol = col;
+}
+
+private CachedWorkspaceSymbol[] extractWorkspaceSymbols(DSymbol* root, istring modulePath, const(uint)[] lineOffsets)
+{
+	CachedWorkspaceSymbol[] symbols;
+
+	static bool isContainer(CompletionKind k)
+	{
+		switch (k)
+		{
+			case CompletionKind.className:
+			case CompletionKind.interfaceName:
+			case CompletionKind.structName:
+			case CompletionKind.unionName:
+			case CompletionKind.enumName:
+			case CompletionKind.templateName:
+			case CompletionKind.mixinTemplateName:
+			case CompletionKind.moduleName:
+				return true;
+			default:
+				return false;
+		}
+	}
+
+	void walk(DSymbol* it)
+	{
+		foreach (sym; it.opSlice())
+		{
+			if (sym.generated) continue;
+			if (!isPublicCompletionKind(sym.kind)) continue;
+			if (sym.symbolFile.length > 0 && sym.symbolFile != modulePath) continue;
+
+			if (sym.name.length > 0)
+			{
+				uint line, col;
+				byteToLineCol(lineOffsets, sym.location, line, col);
+				symbols ~= CachedWorkspaceSymbol(sym.name.data.idup, cast(ubyte) sym.kind, sym.location, line, col);
+			}
+
+			if (isContainer(sym.kind))
+				walk(sym);
+		}
+	}
+
+	if (root !is null)
+		walk(root);
+
+	return symbols;
+}
+

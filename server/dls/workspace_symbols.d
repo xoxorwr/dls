@@ -26,36 +26,36 @@ void lsp_workspace_symbol(int id, JsonNode* params_json) {
         return;
     }
 
-    auto results = dcd_workspace_symbols(cast(string) query[0 .. strlen(query)], g_import_paths);
+    auto results = dcd_workspace_symbols(cast(string) query[0 .. strlen(query)], g_import_paths, 100);
 
     auto root = json.create_array();
 
+    string lastFile = null;
+    char* lastUri = null;
+
     foreach(sym; results)
     {
-        auto rawPath = mem.dupe_add_sentinel(allocator, sym.file);
+        if (sym.file != lastFile)
+        {
+            lastFile = sym.file;
 
-        char[] uriBuf = allocator.alloc!(char)(sym.file.length + 8);
-        memcpy(uriBuf.ptr, "file://".ptr, 7);
-        memcpy(uriBuf.ptr + 7, sym.file.ptr, sym.file.length);
-        uriBuf[sym.file.length + 7] = '\0';
+            char[] uriBuf = allocator.alloc!(char)(sym.file.length + 8);
+            memcpy(uriBuf.ptr, "file://".ptr, 7);
+            memcpy(uriBuf.ptr + 7, sym.file.ptr, sym.file.length);
+            uriBuf[sym.file.length + 7] = '\0';
+            lastUri = uriBuf.ptr;
+        }
 
-        BUFFER bufferp;
-        if (has_buffer(uriBuf.ptr))
-            bufferp = get_buffer(uriBuf.ptr);
-        else
-            bufferp = get_or_open_buffer(heap_allocator, rawPath.ptr);
-
-        if (bufferp.content == null) continue;
-
-        auto text = cast(string) bufferp.content[0 .. strlen(bufferp.content)];
-        auto p = bytesToPosition(text, sym.location);
+        Position p;
+        p.line = sym.line;
+        p.character = sym.character;
 
         auto item = json.create_object();
         json.add_string_to_object(item, "name", mem.dupe_add_sentinel(allocator, sym.name).ptr);
         json.add_number_to_object(item, "kind", kind_to_lsp(sym.kind));
 
         auto location = json.add_object_to_object(item, "location");
-        json.add_string_to_object(location, "uri", uriBuf.ptr);
+        json.add_string_to_object(location, "uri", lastUri);
         create_range(location, "range", p, p);
 
         json.add_item_to_array(root, item);

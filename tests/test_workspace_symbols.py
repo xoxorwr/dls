@@ -67,3 +67,12 @@ class WorkspaceSymbolTests(DlsTestCase):
 
     def test_empty_query_returns_empty(self):
         self.assertEqual(self.client.workspace_symbols(""), [])
+
+    def test_results_are_capped(self):
+        many_code = "\n".join(f"void itemSymbol_{i}() {{}}" for i in range(150))
+        self.write_file("many.d", many_code)
+        self.open_doc("many.d")
+        results = self.client.workspace_symbols("itemSymbol_")
+        self.assertEqual(len(results), 100)
+
+

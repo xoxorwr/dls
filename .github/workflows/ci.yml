@@ -33,8 +33,7 @@ jobs:
           ldmd2 --version | head -1
           python3 --version
 
-      # Build everything: the DCD static library, then the dls server, with
-      # one compiler for both halves so they share a runtime.
+      # Build the dls server, compiling DCD directly from source.
       - name: Build
         shell: bash
         run: |
@@ -46,3 +45,18 @@ jobs:
         run: |
           set -euo pipefail
           python3 run_tests.py
+
+  build-vscode:
+    name: build vscode extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+
+      - name: Package extension
+        run: make build-vscode
