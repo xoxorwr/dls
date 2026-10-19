@@ -43,6 +43,7 @@ class SemanticTokenTests(DlsTestCase):
         "app.d": SOURCE,
         "unopened.d": "module unopened;\n\nvoid main() {}\n",
         "wide.d": 'module wide;\nint aaa; string s = "é😀"; int bbb = aaa;\n',
+        "incomplete.d": "module incomplete;\nvoid main() {\n    ctx\n    unknown_id = 42;\n}\n",
     }
     CLIENT_CAPABILITIES = {
         "textDocument": {
@@ -238,6 +239,11 @@ class SemanticTokenTests(DlsTestCase):
             },
         )
         self.assertEqual(result["data"], [])
+    def test_unresolved_symbols_do_not_warn_on_stderr(self):
+        doc = self.open_doc("incomplete.d")
+        doc.semantic_tokens()
+        warnings = [l for l in self.client.stderr_lines() if "Could not find declaration" in l]
+        self.assertEqual(warnings, [])
 
 
 ALIAS_SOURCE = """module alias_app;

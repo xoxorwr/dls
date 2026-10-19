@@ -133,6 +133,23 @@ class AutocompleteParser : Parser
 	 * hand side is still meaningful when the cursor is past the operator, so
 	 * keep it and skip what is left of the broken expression.
 	 */
+	/**
+	 * Do not consume tokens when an identifier is missing after a dot.
+	 *
+	 * When typing `object.`, the next token is whatever follows on the next
+	 * line (e.g. `if`, `return`, `}`, etc.). The stock parser calls
+	 * `expect(tok!"identifier")`, which on mismatch enters an error-recovery
+	 * loop that scans forward and consumes tokens up to `;`, `}`, or `)`.
+	 * That destroys the subsequent statement or block, causing the entire
+	 * enclosing function to fail parsing and be dropped from the AST.
+	 */
+	override IdentifierOrTemplateInstance parseIdentifierOrTemplateInstance()
+	{
+		if (!currentIs(tok!"identifier"))
+			return null;
+		return super.parseIdentifierOrTemplateInstance();
+	}
+
 	override ExpressionNode parseAssignExpression()
 	{
 		import dparse.ast : AssignExpression;

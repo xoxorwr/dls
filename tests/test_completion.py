@@ -292,3 +292,50 @@ class TemplateShapeCompletionTests(DlsTestCase):
 
     def test_a_templated_union_also_gets_an_ordered_parameter_list(self):
         self.assertEqual(self._detail("UnionPair"), "(K, V)")
+
+
+INCOMPLETE_DOT_BEFORE_STATEMENT = """module app;
+
+struct Transform
+{
+    float x;
+    float y;
+    float z;
+}
+
+alias MyTransform = Transform;
+
+void process(MyTransform[] list)
+{
+    foreach (i; 0 .. 10)
+    {
+        MyTransform item = list[i];
+        item.
+        if (i > 0)
+        {
+            item.x = 1.0;
+        }
+    }
+}
+"""
+
+
+class IncompleteDotStatementCompletionTests(DlsTestCase):
+    """Completion for a member access `item.` ending on its own line followed
+    by another statement on the next line (e.g. `if (...)`).
+
+    Regression test: in incomplete statements like `item.` before another statement,
+    the parser must not eat subsequent tokens as error recovery, which previously
+    caused the entire enclosing function body to fail parsing and be dropped.
+    """
+
+    PROJECT = {"app.d": INCOMPLETE_DOT_BEFORE_STATEMENT}
+
+    def test_completion_on_trailing_dot_before_subsequent_statement(self):
+        doc = self.open_doc("app.d")
+        items = doc.completion("item.")["items"]
+        found = labels(items)
+        self.assertIn("x", found)
+        self.assertIn("y", found)
+        self.assertIn("z", found)
+
